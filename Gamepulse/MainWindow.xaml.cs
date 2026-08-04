@@ -14,6 +14,8 @@ namespace Gamepulse
         private readonly DispatcherTimer _timer;
         private readonly SystemMetricsCollector _systemMetricsCollector;
         private readonly DiskMetricsCollector _diskMetricsCollector;
+        private readonly GpuMetricsCollector _gpuMetricsCollector;
+        private readonly WindowsGpuEngineCollector _windowsGpuEngineCollector;
         private readonly SessionManager _sessionManager;
         private readonly CsvTelemetryWriter _csvTelemetryWriter;
 
@@ -25,6 +27,8 @@ namespace Gamepulse
 
             _systemMetricsCollector = new SystemMetricsCollector();
             _diskMetricsCollector = new DiskMetricsCollector();
+            _gpuMetricsCollector = new GpuMetricsCollector();
+            _windowsGpuEngineCollector = new WindowsGpuEngineCollector();
             _sessionManager = new SessionManager();
             _csvTelemetryWriter = new CsvTelemetryWriter();
 
@@ -38,6 +42,19 @@ namespace Gamepulse
         {
             SystemMetrics systemMetrics = _systemMetricsCollector.Collect();
             DiskMetrics diskMetrics = _diskMetricsCollector.Collect();
+            GpuMetrics gpuMetrics = _gpuMetricsCollector.Collect();
+            WindowsGpuEngineMetrics windowsGpuEngineMetrics = _windowsGpuEngineCollector.Collect();
+
+            GpuDeviceMetrics? dedicatedGpu = GetDedicatedGpu(gpuMetrics);
+            GpuDeviceMetrics? integratedGpu = GetIntegratedGpu(gpuMetrics);
+
+            if (integratedGpu == null)
+            {
+                integratedGpu = CreateEstimatedIntelGpu(windowsGpuEngineMetrics, dedicatedGpu);
+            }
+
+            GpuDeviceMetrics? gpu0 = integratedGpu;
+            GpuDeviceMetrics? gpu1 = dedicatedGpu;
 
             CpuText.Text = $"{systemMetrics.CpuPercent:0}%";
             RamText.Text = $"{systemMetrics.Memory.UsedPercentage:0}%";
@@ -45,6 +62,8 @@ namespace Gamepulse
 
             DiskText.Text = $"{diskMetrics.ActivePercent:0}%";
             DiskDetailsText.Text = $"Read {diskMetrics.ReadMBps:0.0} MB/s | Write {diskMetrics.WriteMBps:0.0} MB/s";
+
+            UpdateGpuCards(gpu0, gpu1);
 
             if (_sessionManager.IsRunning && _sessionManager.CurrentSession != null)
             {
@@ -68,6 +87,16 @@ namespace Gamepulse
                     DiskWriteMBps = diskMetrics.WriteMBps,
                     DiskActivePercent = diskMetrics.ActivePercent,
 
+                    Gpu0Name = gpu0?.Name ?? "",
+                    Gpu0UsagePercent = gpu0?.UsagePercent,
+                    Gpu0VramUsedMb = gpu0?.VramUsedMb,
+                    Gpu0TemperatureC = gpu0?.TemperatureC,
+
+                    Gpu1Name = gpu1?.Name ?? "",
+                    Gpu1UsagePercent = gpu1?.UsagePercent,
+                    Gpu1VramUsedMb = gpu1?.VramUsedMb,
+                    Gpu1TemperatureC = gpu1?.TemperatureC,
+
                     TopRamProcesses = ""
                 };
 
@@ -76,6 +105,94 @@ namespace Gamepulse
 
                 SamplesText.Text = $"Samples Recorded: {_samples.Count}";
             }
+        }
+
+        private static GpuDeviceMetrics? GetIntegratedGpu(GpuMetrics gpuMetrics)
+        {
+            return gpuMetrics.Devices
+                .FirstOrDefault(gpu =>
+                    gpu.Name.Contains("Intel", StringComparison.OrdinalIgnoreCase) ||
+                    gpu.Name.Contains("Iris", StringComparison.OrdinalIgnoreCase) ||
+                    gpu.Name.Contains("UHD", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static GpuDeviceMetrics? GetDedicatedGpu(GpuMetrics gpuMetrics)
+        {
+            return gpuMetrics.Devices
+                .FirstOrDefault(gpu =>
+                    gpu.Name.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase) ||
+                    gpu.Name.Contains("GeForce", StringComparison.OrdinalIgnoreCase) ||
+                    gpu.Name.Contains("RTX", StringComparison.OrdinalIgnoreCase) ||
+                    gpu.Name.Contains("GTX", StringComparison.OrdinalIgnoreCase) ||
+                    gpu.Name.Contains("AMD", StringComparison.OrdinalIgnoreCase) ||
+                    gpu.Name.Contains("Radeon", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static GpuDeviceMetrics? CreateEstimatedIntelGpu(
+            WindowsGpuEngineMetrics windowsGpuEngineMetrics,
+            GpuDeviceMetrics? dedicatedGpu)
+        {
+            double estimatedIntelUsage = windowsGpuEngineMetrics.TotalUsagePercent;
+
+            if (dedicatedGpu != null)
+            {
+                estimatedIntelUsage -= dedicatedGpu.UsagePercent;
+            }
+
+            if (estimatedIntelUsage < 0)
+            {
+                estimatedIntelUsage = 0;
+            }
+
+            if (estimatedIntelUsage > 100)
+            {
+                estimatedIntelUsage = 100;
+            }
+
+            return new GpuDeviceMetrics(
+                "Intel Integrated GPU estimate from Windows GPU Engine",
+                estimatedIntelUsage,
+                null,
+                null
+            );
+        }
+
+        private void UpdateGpuCards(GpuDeviceMetrics? gpu0, GpuDeviceMetrics? gpu1)
+        {
+            if (gpu0 == null)
+            {
+                Gpu0Text.Text = "0%";
+                Gpu0DetailsText.Text = "Not detected";
+            }
+            else
+            {
+                Gpu0Text.Text = $"{gpu0.UsagePercent:0}%";
+                Gpu0DetailsText.Text = FormatGpuDetails(gpu0);
+            }
+
+            if (gpu1 == null)
+            {
+                Gpu1Text.Text = "0%";
+                Gpu1DetailsText.Text = "Not detected";
+            }
+            else
+            {
+                Gpu1Text.Text = $"{gpu1.UsagePercent:0}%";
+                Gpu1DetailsText.Text = FormatGpuDetails(gpu1);
+            }
+        }
+
+        private static string FormatGpuDetails(GpuDeviceMetrics gpu)
+        {
+            string temperatureText = gpu.TemperatureC.HasValue
+                ? $" | {gpu.TemperatureC.Value:0}°C"
+                : "";
+
+            string vramText = gpu.VramUsedMb.HasValue
+                ? $" | VRAM {gpu.VramUsedMb.Value:0} MB"
+                : "";
+
+            return $"{gpu.Name}{temperatureText}{vramText}";
         }
 
         private void StartButton_Click(object sender, RoutedEventArgs e)
@@ -130,6 +247,12 @@ namespace Gamepulse
                 .Where(sample => sample.DiskWriteMBps.HasValue)
                 .Max(sample => sample.DiskWriteMBps!.Value);
 
+            double? averageGpu0 = AverageNullable(_samples.Select(sample => sample.Gpu0UsagePercent));
+            double? peakGpu0 = MaxNullable(_samples.Select(sample => sample.Gpu0UsagePercent));
+
+            double? averageGpu1 = AverageNullable(_samples.Select(sample => sample.Gpu1UsagePercent));
+            double? peakGpu1 = MaxNullable(_samples.Select(sample => sample.Gpu1UsagePercent));
+
             TimeSpan duration = _sessionManager.GetDuration();
 
             SummaryText.Text =
@@ -141,15 +264,56 @@ namespace Gamepulse
                 $"Peak Disk Active: {peakDiskActive:0}%\n" +
                 $"Peak Disk Read: {peakDiskRead:0.0} MB/s\n" +
                 $"Peak Disk Write: {peakDiskWrite:0.0} MB/s\n" +
+                $"Average GPU 0: {FormatNullablePercent(averageGpu0)}\n" +
+                $"Peak GPU 0: {FormatNullablePercent(peakGpu0)}\n" +
+                $"Average GPU 1: {FormatNullablePercent(averageGpu1)}\n" +
+                $"Peak GPU 1: {FormatNullablePercent(peakGpu1)}\n" +
                 $"Samples Recorded: {_samples.Count}\n" +
                 $"Session Duration: {duration:hh\\:mm\\:ss}\n" +
                 $"CSV File: {_csvTelemetryWriter.CurrentFilePath}";
+        }
+
+        private static double? AverageNullable(IEnumerable<double?> values)
+        {
+            List<double> validValues = values
+                .Where(value => value.HasValue)
+                .Select(value => value!.Value)
+                .ToList();
+
+            if (validValues.Count == 0)
+            {
+                return null;
+            }
+
+            return validValues.Average();
+        }
+
+        private static double? MaxNullable(IEnumerable<double?> values)
+        {
+            List<double> validValues = values
+                .Where(value => value.HasValue)
+                .Select(value => value!.Value)
+                .ToList();
+
+            if (validValues.Count == 0)
+            {
+                return null;
+            }
+
+            return validValues.Max();
+        }
+
+        private static string FormatNullablePercent(double? value)
+        {
+            return value.HasValue ? $"{value.Value:0}%" : "N/A";
         }
 
         protected override void OnClosed(EventArgs e)
         {
             _systemMetricsCollector.Dispose();
             _diskMetricsCollector.Dispose();
+            _gpuMetricsCollector.Dispose();
+            _windowsGpuEngineCollector.Dispose();
             base.OnClosed(e);
         }
     }
