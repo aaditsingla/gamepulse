@@ -16,6 +16,7 @@ namespace Gamepulse
         private readonly DiskMetricsCollector _diskMetricsCollector;
         private readonly GpuMetricsCollector _gpuMetricsCollector;
         private readonly WindowsGpuEngineCollector _windowsGpuEngineCollector;
+        private readonly ActiveGameDetector _activeGameDetector;
         private readonly SessionManager _sessionManager;
         private readonly CsvTelemetryWriter _csvTelemetryWriter;
 
@@ -29,6 +30,7 @@ namespace Gamepulse
             _diskMetricsCollector = new DiskMetricsCollector();
             _gpuMetricsCollector = new GpuMetricsCollector();
             _windowsGpuEngineCollector = new WindowsGpuEngineCollector();
+            _activeGameDetector = new ActiveGameDetector();
             _sessionManager = new SessionManager();
             _csvTelemetryWriter = new CsvTelemetryWriter();
 
@@ -44,6 +46,7 @@ namespace Gamepulse
             DiskMetrics diskMetrics = _diskMetricsCollector.Collect();
             GpuMetrics gpuMetrics = _gpuMetricsCollector.Collect();
             WindowsGpuEngineMetrics windowsGpuEngineMetrics = _windowsGpuEngineCollector.Collect();
+            ActiveProcessMetrics activeProcessMetrics = _activeGameDetector.Collect();
 
             GpuDeviceMetrics? dedicatedGpu = GetDedicatedGpu(gpuMetrics);
             GpuDeviceMetrics? integratedGpu = GetIntegratedGpu(gpuMetrics);
@@ -64,6 +67,7 @@ namespace Gamepulse
             DiskDetailsText.Text = $"Read {diskMetrics.ReadMBps:0.0} MB/s | Write {diskMetrics.WriteMBps:0.0} MB/s";
 
             UpdateGpuCards(gpu0, gpu1);
+            UpdateActiveProcessCard(activeProcessMetrics);
 
             if (_sessionManager.IsRunning && _sessionManager.CurrentSession != null)
             {
@@ -76,7 +80,9 @@ namespace Gamepulse
                     SessionId = _sessionManager.CurrentSession.SessionId,
                     Timestamp = DateTime.Now,
                     ElapsedSeconds = _sessionManager.GetElapsedSeconds(),
-                    GameName = _sessionManager.CurrentSession.GameName,
+                    GameName = string.IsNullOrWhiteSpace(activeProcessMetrics.ProcessName)
+                        ? _sessionManager.CurrentSession.GameName
+                        : activeProcessMetrics.ProcessName,
 
                     CpuPercent = systemMetrics.CpuPercent,
                     RamPercent = systemMetrics.Memory.UsedPercentage,
@@ -96,6 +102,9 @@ namespace Gamepulse
                     Gpu1UsagePercent = gpu1?.UsagePercent,
                     Gpu1VramUsedMb = gpu1?.VramUsedMb,
                     Gpu1TemperatureC = gpu1?.TemperatureC,
+
+                    ActiveGameProcessName = activeProcessMetrics.ProcessName,
+                    GameRamMb = activeProcessMetrics.RamMb,
 
                     TopRamProcesses = ""
                 };
@@ -128,7 +137,7 @@ namespace Gamepulse
                     gpu.Name.Contains("Radeon", StringComparison.OrdinalIgnoreCase));
         }
 
-        private static GpuDeviceMetrics? CreateEstimatedIntelGpu(
+        private static GpuDeviceMetrics CreateEstimatedIntelGpu(
             WindowsGpuEngineMetrics windowsGpuEngineMetrics,
             GpuDeviceMetrics? dedicatedGpu)
         {
@@ -180,6 +189,20 @@ namespace Gamepulse
                 Gpu1Text.Text = $"{gpu1.UsagePercent:0}%";
                 Gpu1DetailsText.Text = FormatGpuDetails(gpu1);
             }
+        }
+
+        private void UpdateActiveProcessCard(ActiveProcessMetrics activeProcessMetrics)
+        {
+            if (string.IsNullOrWhiteSpace(activeProcessMetrics.ProcessName))
+            {
+                ActiveProcessText.Text = "None";
+                ActiveProcessDetailsText.Text = "RAM 0 MB";
+                return;
+            }
+
+            ActiveProcessText.Text = activeProcessMetrics.ProcessName;
+            ActiveProcessDetailsText.Text =
+                $"RAM {activeProcessMetrics.RamMb:0} MB | Window: {activeProcessMetrics.WindowTitle}";
         }
 
         private static string FormatGpuDetails(GpuDeviceMetrics gpu)
@@ -253,6 +276,19 @@ namespace Gamepulse
             double? averageGpu1 = AverageNullable(_samples.Select(sample => sample.Gpu1UsagePercent));
             double? peakGpu1 = MaxNullable(_samples.Select(sample => sample.Gpu1UsagePercent));
 
+            string mostCommonActiveProcess = _samples
+                .Where(sample => !string.IsNullOrWhiteSpace(sample.ActiveGameProcessName))
+                .GroupBy(sample => sample.ActiveGameProcessName)
+                .OrderByDescending(group => group.Count())
+                .Select(group => group.Key)
+                .FirstOrDefault() ?? "N/A";
+
+            double peakGameRamMb = _samples
+                .Where(sample => sample.GameRamMb.HasValue)
+                .Select(sample => sample.GameRamMb!.Value)
+                .DefaultIfEmpty(0)
+                .Max();
+
             TimeSpan duration = _sessionManager.GetDuration();
 
             SummaryText.Text =
@@ -268,6 +304,8 @@ namespace Gamepulse
                 $"Peak GPU 0: {FormatNullablePercent(peakGpu0)}\n" +
                 $"Average GPU 1: {FormatNullablePercent(averageGpu1)}\n" +
                 $"Peak GPU 1: {FormatNullablePercent(peakGpu1)}\n" +
+                $"Most Common Active Process: {mostCommonActiveProcess}\n" +
+                $"Peak Active Process RAM: {peakGameRamMb:0} MB\n" +
                 $"Samples Recorded: {_samples.Count}\n" +
                 $"Session Duration: {duration:hh\\:mm\\:ss}\n" +
                 $"CSV File: {_csvTelemetryWriter.CurrentFilePath}";
