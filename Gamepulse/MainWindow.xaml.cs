@@ -17,6 +17,7 @@ namespace Gamepulse
         private readonly GpuMetricsCollector _gpuMetricsCollector;
         private readonly WindowsGpuEngineCollector _windowsGpuEngineCollector;
         private readonly ActiveGameDetector _activeGameDetector;
+        private readonly TopRamProcessCollector _topRamProcessCollector;
         private readonly SessionManager _sessionManager;
         private readonly CsvTelemetryWriter _csvTelemetryWriter;
 
@@ -31,6 +32,7 @@ namespace Gamepulse
             _gpuMetricsCollector = new GpuMetricsCollector();
             _windowsGpuEngineCollector = new WindowsGpuEngineCollector();
             _activeGameDetector = new ActiveGameDetector();
+            _topRamProcessCollector = new TopRamProcessCollector();
             _sessionManager = new SessionManager();
             _csvTelemetryWriter = new CsvTelemetryWriter();
 
@@ -47,6 +49,9 @@ namespace Gamepulse
             GpuMetrics gpuMetrics = _gpuMetricsCollector.Collect();
             WindowsGpuEngineMetrics windowsGpuEngineMetrics = _windowsGpuEngineCollector.Collect();
             ActiveProcessMetrics activeProcessMetrics = _activeGameDetector.Collect();
+
+            List<ProcessMemoryMetrics> topRamProcesses = _topRamProcessCollector.CollectTopProcesses(5);
+            string topRamProcessesText = FormatTopRamProcesses(topRamProcesses);
 
             GpuDeviceMetrics? dedicatedGpu = GetDedicatedGpu(gpuMetrics);
             GpuDeviceMetrics? integratedGpu = GetIntegratedGpu(gpuMetrics);
@@ -106,7 +111,7 @@ namespace Gamepulse
                     ActiveGameProcessName = activeProcessMetrics.ProcessName,
                     GameRamMb = activeProcessMetrics.RamMb,
 
-                    TopRamProcesses = ""
+                    TopRamProcesses = topRamProcessesText
                 };
 
                 _samples.Add(sample);
@@ -114,6 +119,17 @@ namespace Gamepulse
 
                 SamplesText.Text = $"Samples Recorded: {_samples.Count}";
             }
+        }
+
+        private static string FormatTopRamProcesses(List<ProcessMemoryMetrics> processes)
+        {
+            if (processes.Count == 0)
+            {
+                return "";
+            }
+
+            return string.Join(" | ", processes.Select(process =>
+                $"{process.ProcessName}: {process.RamMb:0} MB"));
         }
 
         private static GpuDeviceMetrics? GetIntegratedGpu(GpuMetrics gpuMetrics)
@@ -289,6 +305,8 @@ namespace Gamepulse
                 .DefaultIfEmpty(0)
                 .Max();
 
+            string mostCommonTopRamProcess = GetMostCommonTopRamProcess();
+
             TimeSpan duration = _sessionManager.GetDuration();
 
             SummaryText.Text =
@@ -306,9 +324,30 @@ namespace Gamepulse
                 $"Peak GPU 1: {FormatNullablePercent(peakGpu1)}\n" +
                 $"Most Common Active Process: {mostCommonActiveProcess}\n" +
                 $"Peak Active Process RAM: {peakGameRamMb:0} MB\n" +
+                $"Most Common Top RAM Process: {mostCommonTopRamProcess}\n" +
                 $"Samples Recorded: {_samples.Count}\n" +
                 $"Session Duration: {duration:hh\\:mm\\:ss}\n" +
                 $"CSV File: {_csvTelemetryWriter.CurrentFilePath}";
+        }
+
+        private string GetMostCommonTopRamProcess()
+        {
+            List<string> firstProcesses = _samples
+                .Where(sample => !string.IsNullOrWhiteSpace(sample.TopRamProcesses))
+                .Select(sample => sample.TopRamProcesses.Split('|')[0].Trim())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .ToList();
+
+            if (firstProcesses.Count == 0)
+            {
+                return "N/A";
+            }
+
+            return firstProcesses
+                .GroupBy(value => value)
+                .OrderByDescending(group => group.Count())
+                .Select(group => group.Key)
+                .First();
         }
 
         private static double? AverageNullable(IEnumerable<double?> values)
