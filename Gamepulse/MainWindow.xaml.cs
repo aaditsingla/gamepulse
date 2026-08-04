@@ -114,6 +114,7 @@ namespace Gamepulse
                     Gpu1TemperatureC = gpu1?.TemperatureC,
 
                     ActiveGameProcessName = activeProcessMetrics.ProcessName,
+                    GameCpuPercent = activeProcessMetrics.CpuPercent,
                     GameRamMb = activeProcessMetrics.RamMb,
 
                     TopRamProcesses = topRamProcessesText,
@@ -229,13 +230,17 @@ namespace Gamepulse
             if (string.IsNullOrWhiteSpace(activeProcessMetrics.ProcessName))
             {
                 ActiveProcessText.Text = "None";
-                ActiveProcessDetailsText.Text = "RAM 0 MB";
+                ActiveProcessDetailsText.Text = "CPU N/A | RAM 0 MB";
                 return;
             }
 
+            string cpuText = activeProcessMetrics.CpuPercent.HasValue
+                ? $"{activeProcessMetrics.CpuPercent.Value:0.0}%"
+                : "N/A";
+
             ActiveProcessText.Text = activeProcessMetrics.ProcessName;
             ActiveProcessDetailsText.Text =
-                $"RAM {activeProcessMetrics.RamMb:0} MB | Window: {activeProcessMetrics.WindowTitle}";
+                $"CPU {cpuText} | RAM {activeProcessMetrics.RamMb:0} MB | Window: {activeProcessMetrics.WindowTitle}";
         }
 
         private static string FormatGpuDetails(GpuDeviceMetrics gpu)
@@ -309,6 +314,9 @@ namespace Gamepulse
             double? averageGpu1 = AverageNullable(_samples.Select(sample => sample.Gpu1UsagePercent));
             double? peakGpu1 = MaxNullable(_samples.Select(sample => sample.Gpu1UsagePercent));
 
+            double? averageGameCpu = AverageNullable(_samples.Select(sample => sample.GameCpuPercent));
+            double? peakGameCpu = MaxNullable(_samples.Select(sample => sample.GameCpuPercent));
+
             string mostCommonActiveProcess = _samples
                 .Where(sample => !string.IsNullOrWhiteSpace(sample.ActiveGameProcessName))
                 .GroupBy(sample => sample.ActiveGameProcessName)
@@ -341,6 +349,8 @@ namespace Gamepulse
                 $"Average GPU 1: {FormatNullablePercent(averageGpu1)}\n" +
                 $"Peak GPU 1: {FormatNullablePercent(peakGpu1)}\n" +
                 $"Most Common Active Process: {mostCommonActiveProcess}\n" +
+                $"Average Active Process CPU: {FormatNullablePercent(averageGameCpu)}\n" +
+                $"Peak Active Process CPU: {FormatNullablePercent(peakGameCpu)}\n" +
                 $"Peak Active Process RAM: {peakGameRamMb:0} MB\n" +
                 $"Most Common Top RAM Process: {mostCommonTopRamProcess}\n" +
                 $"Most Common Top CPU Process: {mostCommonTopCpuProcess}\n" +
@@ -421,7 +431,7 @@ namespace Gamepulse
 
         private static string FormatNullablePercent(double? value)
         {
-            return value.HasValue ? $"{value.Value:0}%" : "N/A";
+            return value.HasValue ? $"{value.Value:0.0}%" : "N/A";
         }
 
         protected override void OnClosed(EventArgs e)

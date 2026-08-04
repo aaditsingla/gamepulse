@@ -5,12 +5,18 @@
         public string ProcessName { get; }
         public string WindowTitle { get; }
         public double RamMb { get; }
+        public double? CpuPercent { get; }
 
-        public ActiveProcessMetrics(string processName, string windowTitle, double ramMb)
+        public ActiveProcessMetrics(
+            string processName,
+            string windowTitle,
+            double ramMb,
+            double? cpuPercent)
         {
             ProcessName = processName;
             WindowTitle = windowTitle;
             RamMb = ramMb;
+            CpuPercent = cpuPercent;
         }
     }
 }
