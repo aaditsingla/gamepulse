@@ -67,7 +67,8 @@ namespace Gamepulse.Services
                 "OnePercentLowFps",
                 "PointOnePercentLowFps",
                 "StutterCount",
-                "TopRamProcesses"
+                "TopRamProcesses",
+                "TopCpuProcesses"
             );
         }
 
@@ -102,7 +103,8 @@ namespace Gamepulse.Services
                 FormatNullableDouble(sample.OnePercentLowFps),
                 FormatNullableDouble(sample.PointOnePercentLowFps),
                 sample.StutterCount?.ToString(CultureInfo.InvariantCulture) ?? "",
-                Escape(sample.TopRamProcesses)
+                Escape(sample.TopRamProcesses),
+                Escape(sample.TopCpuProcesses)
             );
         }
 

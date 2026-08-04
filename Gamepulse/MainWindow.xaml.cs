@@ -18,6 +18,7 @@ namespace Gamepulse
         private readonly WindowsGpuEngineCollector _windowsGpuEngineCollector;
         private readonly ActiveGameDetector _activeGameDetector;
         private readonly TopRamProcessCollector _topRamProcessCollector;
+        private readonly TopCpuProcessCollector _topCpuProcessCollector;
         private readonly SessionManager _sessionManager;
         private readonly CsvTelemetryWriter _csvTelemetryWriter;
 
@@ -33,6 +34,7 @@ namespace Gamepulse
             _windowsGpuEngineCollector = new WindowsGpuEngineCollector();
             _activeGameDetector = new ActiveGameDetector();
             _topRamProcessCollector = new TopRamProcessCollector();
+            _topCpuProcessCollector = new TopCpuProcessCollector();
             _sessionManager = new SessionManager();
             _csvTelemetryWriter = new CsvTelemetryWriter();
 
@@ -51,7 +53,10 @@ namespace Gamepulse
             ActiveProcessMetrics activeProcessMetrics = _activeGameDetector.Collect();
 
             List<ProcessMemoryMetrics> topRamProcesses = _topRamProcessCollector.CollectTopProcesses(5);
+            List<ProcessCpuMetrics> topCpuProcesses = _topCpuProcessCollector.CollectTopProcesses(5);
+
             string topRamProcessesText = FormatTopRamProcesses(topRamProcesses);
+            string topCpuProcessesText = FormatTopCpuProcesses(topCpuProcesses);
 
             GpuDeviceMetrics? dedicatedGpu = GetDedicatedGpu(gpuMetrics);
             GpuDeviceMetrics? integratedGpu = GetIntegratedGpu(gpuMetrics);
@@ -111,7 +116,8 @@ namespace Gamepulse
                     ActiveGameProcessName = activeProcessMetrics.ProcessName,
                     GameRamMb = activeProcessMetrics.RamMb,
 
-                    TopRamProcesses = topRamProcessesText
+                    TopRamProcesses = topRamProcessesText,
+                    TopCpuProcesses = topCpuProcessesText
                 };
 
                 _samples.Add(sample);
@@ -130,6 +136,17 @@ namespace Gamepulse
 
             return string.Join(" | ", processes.Select(process =>
                 $"{process.ProcessName}: {process.RamMb:0} MB"));
+        }
+
+        private static string FormatTopCpuProcesses(List<ProcessCpuMetrics> processes)
+        {
+            if (processes.Count == 0)
+            {
+                return "";
+            }
+
+            return string.Join(" | ", processes.Select(process =>
+                $"{process.ProcessName}: {process.CpuPercent:0.0}%"));
         }
 
         private static GpuDeviceMetrics? GetIntegratedGpu(GpuMetrics gpuMetrics)
@@ -306,6 +323,7 @@ namespace Gamepulse
                 .Max();
 
             string mostCommonTopRamProcess = GetMostCommonTopRamProcess();
+            string mostCommonTopCpuProcess = GetMostCommonTopCpuProcess();
 
             TimeSpan duration = _sessionManager.GetDuration();
 
@@ -325,6 +343,7 @@ namespace Gamepulse
                 $"Most Common Active Process: {mostCommonActiveProcess}\n" +
                 $"Peak Active Process RAM: {peakGameRamMb:0} MB\n" +
                 $"Most Common Top RAM Process: {mostCommonTopRamProcess}\n" +
+                $"Most Common Top CPU Process: {mostCommonTopCpuProcess}\n" +
                 $"Samples Recorded: {_samples.Count}\n" +
                 $"Session Duration: {duration:hh\\:mm\\:ss}\n" +
                 $"CSV File: {_csvTelemetryWriter.CurrentFilePath}";
@@ -335,6 +354,26 @@ namespace Gamepulse
             List<string> firstProcesses = _samples
                 .Where(sample => !string.IsNullOrWhiteSpace(sample.TopRamProcesses))
                 .Select(sample => sample.TopRamProcesses.Split('|')[0].Trim())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .ToList();
+
+            if (firstProcesses.Count == 0)
+            {
+                return "N/A";
+            }
+
+            return firstProcesses
+                .GroupBy(value => value)
+                .OrderByDescending(group => group.Count())
+                .Select(group => group.Key)
+                .First();
+        }
+
+        private string GetMostCommonTopCpuProcess()
+        {
+            List<string> firstProcesses = _samples
+                .Where(sample => !string.IsNullOrWhiteSpace(sample.TopCpuProcesses))
+                .Select(sample => sample.TopCpuProcesses.Split('|')[0].Trim())
                 .Where(value => !string.IsNullOrWhiteSpace(value))
                 .ToList();
 

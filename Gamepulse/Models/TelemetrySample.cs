@@ -40,5 +40,6 @@ namespace Gamepulse.Models
         public int? StutterCount { get; set; }
 
         public string TopRamProcesses { get; set; } = "";
+        public string TopCpuProcesses { get; set; } = "";
     }
 }
