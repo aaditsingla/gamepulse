@@ -13,6 +13,7 @@ namespace Gamepulse
     {
         private readonly DispatcherTimer _timer;
         private readonly SystemMetricsCollector _systemMetricsCollector;
+        private readonly DiskMetricsCollector _diskMetricsCollector;
         private readonly SessionManager _sessionManager;
         private readonly CsvTelemetryWriter _csvTelemetryWriter;
 
@@ -23,6 +24,7 @@ namespace Gamepulse
             InitializeComponent();
 
             _systemMetricsCollector = new SystemMetricsCollector();
+            _diskMetricsCollector = new DiskMetricsCollector();
             _sessionManager = new SessionManager();
             _csvTelemetryWriter = new CsvTelemetryWriter();
 
@@ -35,10 +37,14 @@ namespace Gamepulse
         private void Timer_Tick(object? sender, EventArgs e)
         {
             SystemMetrics systemMetrics = _systemMetricsCollector.Collect();
+            DiskMetrics diskMetrics = _diskMetricsCollector.Collect();
 
             CpuText.Text = $"{systemMetrics.CpuPercent:0}%";
             RamText.Text = $"{systemMetrics.Memory.UsedPercentage:0}%";
             RamDetailsText.Text = $"{systemMetrics.Memory.UsedGb:0.0} GB / {systemMetrics.Memory.TotalGb:0.0} GB";
+
+            DiskText.Text = $"{diskMetrics.ActivePercent:0}%";
+            DiskDetailsText.Text = $"Read {diskMetrics.ReadMBps:0.0} MB/s | Write {diskMetrics.WriteMBps:0.0} MB/s";
 
             if (_sessionManager.IsRunning && _sessionManager.CurrentSession != null)
             {
@@ -57,6 +63,10 @@ namespace Gamepulse
                     RamPercent = systemMetrics.Memory.UsedPercentage,
                     RamUsedGb = systemMetrics.Memory.UsedGb,
                     RamTotalGb = systemMetrics.Memory.TotalGb,
+
+                    DiskReadMBps = diskMetrics.ReadMBps,
+                    DiskWriteMBps = diskMetrics.WriteMBps,
+                    DiskActivePercent = diskMetrics.ActivePercent,
 
                     TopRamProcesses = ""
                 };
@@ -104,6 +114,22 @@ namespace Gamepulse
             double averageRam = _samples.Average(sample => sample.RamPercent);
             double peakRam = _samples.Max(sample => sample.RamPercent);
 
+            double averageDiskActive = _samples
+                .Where(sample => sample.DiskActivePercent.HasValue)
+                .Average(sample => sample.DiskActivePercent!.Value);
+
+            double peakDiskActive = _samples
+                .Where(sample => sample.DiskActivePercent.HasValue)
+                .Max(sample => sample.DiskActivePercent!.Value);
+
+            double peakDiskRead = _samples
+                .Where(sample => sample.DiskReadMBps.HasValue)
+                .Max(sample => sample.DiskReadMBps!.Value);
+
+            double peakDiskWrite = _samples
+                .Where(sample => sample.DiskWriteMBps.HasValue)
+                .Max(sample => sample.DiskWriteMBps!.Value);
+
             TimeSpan duration = _sessionManager.GetDuration();
 
             SummaryText.Text =
@@ -111,6 +137,10 @@ namespace Gamepulse
                 $"Peak CPU: {peakCpu:0}%\n" +
                 $"Average RAM: {averageRam:0}%\n" +
                 $"Peak RAM: {peakRam:0}%\n" +
+                $"Average Disk Active: {averageDiskActive:0}%\n" +
+                $"Peak Disk Active: {peakDiskActive:0}%\n" +
+                $"Peak Disk Read: {peakDiskRead:0.0} MB/s\n" +
+                $"Peak Disk Write: {peakDiskWrite:0.0} MB/s\n" +
                 $"Samples Recorded: {_samples.Count}\n" +
                 $"Session Duration: {duration:hh\\:mm\\:ss}\n" +
                 $"CSV File: {_csvTelemetryWriter.CurrentFilePath}";
@@ -119,6 +149,7 @@ namespace Gamepulse
         protected override void OnClosed(EventArgs e)
         {
             _systemMetricsCollector.Dispose();
+            _diskMetricsCollector.Dispose();
             base.OnClosed(e);
         }
     }
