@@ -20,6 +20,7 @@ namespace Gamepulse
         private readonly TopRamProcessCollector _topRamProcessCollector;
         private readonly TopCpuProcessCollector _topCpuProcessCollector;
         private readonly PresentMonCaptureService _presentMonCaptureService;
+        private readonly PresentMonFrameMetricsParser _presentMonFrameMetricsParser;
         private readonly SessionManager _sessionManager;
         private readonly CsvTelemetryWriter _csvTelemetryWriter;
 
@@ -37,6 +38,7 @@ namespace Gamepulse
             _topRamProcessCollector = new TopRamProcessCollector();
             _topCpuProcessCollector = new TopCpuProcessCollector();
             _presentMonCaptureService = new PresentMonCaptureService();
+            _presentMonFrameMetricsParser = new PresentMonFrameMetricsParser();
             _sessionManager = new SessionManager();
             _csvTelemetryWriter = new CsvTelemetryWriter();
 
@@ -300,15 +302,41 @@ namespace Gamepulse
 
             string presentMonStatus = await _presentMonCaptureService.StopAndGetPhase1StatusAsync();
 
+            FrameMetricsSummary frameMetricsSummary = _presentMonFrameMetricsParser.Parse(
+                _presentMonCaptureService.CurrentOutputFilePath
+            );
+
+            string compactFrameSummary = FormatCompactFrameSummary(frameMetricsSummary);
+            string frameMetricsText = _presentMonFrameMetricsParser.FormatSummary(frameMetricsSummary);
+
             SummaryText.Text =
+                compactFrameSummary +
+                "\n\n" +
                 sessionSummary +
                 "\n\n" +
-                presentMonStatus;
+                presentMonStatus +
+                "\n\n" +
+                frameMetricsText;
 
             StatusText.Text = "Status: Session stopped";
 
             StartButton.IsEnabled = true;
             StopButton.IsEnabled = true;
+        }
+
+        private static string FormatCompactFrameSummary(FrameMetricsSummary summary)
+        {
+            if (summary.FrameCount == 0)
+            {
+                return "FPS Summary: No valid PresentMon frame rows parsed";
+            }
+
+            return
+                $"FPS Summary: {summary.AverageFps:0.0} FPS | " +
+                $"Avg FT {summary.AverageFrameTimeMs:0.00} ms | " +
+                $"Worst FT {summary.WorstFrameTimeMs:0.00} ms | " +
+                $"1% Low {summary.OnePercentLowFps:0.0} FPS | " +
+                $"Frames {summary.FrameCount}";
         }
 
         private void GenerateSessionSummary()
