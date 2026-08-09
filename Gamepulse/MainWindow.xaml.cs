@@ -19,6 +19,7 @@ namespace Gamepulse
         private readonly ActiveGameDetector _activeGameDetector;
         private readonly TopRamProcessCollector _topRamProcessCollector;
         private readonly TopCpuProcessCollector _topCpuProcessCollector;
+        private readonly PresentMonCaptureService _presentMonCaptureService;
         private readonly SessionManager _sessionManager;
         private readonly CsvTelemetryWriter _csvTelemetryWriter;
 
@@ -35,6 +36,7 @@ namespace Gamepulse
             _activeGameDetector = new ActiveGameDetector();
             _topRamProcessCollector = new TopRamProcessCollector();
             _topCpuProcessCollector = new TopCpuProcessCollector();
+            _presentMonCaptureService = new PresentMonCaptureService();
             _sessionManager = new SessionManager();
             _csvTelemetryWriter = new CsvTelemetryWriter();
 
@@ -263,19 +265,42 @@ namespace Gamepulse
             _sessionManager.StartSession("Unknown");
             _csvTelemetryWriter.CreateSessionFile(_sessionManager.CurrentSession!);
 
-            StatusText.Text = "Status: Session running";
+            bool presentMonStarted = _presentMonCaptureService.StartPhase1Capture(
+                _sessionManager.CurrentSession!
+            );
+
+            StatusText.Text = presentMonStarted
+                ? "Status: Session running with Phase 1 PresentMon capture"
+                : "Status: Session running, PresentMon failed";
+
             DurationText.Text = "Session Duration: 00:00:00";
             SamplesText.Text = "Samples Recorded: 0";
-            SummaryText.Text = "Session is recording. Summary will appear after you stop the session.";
+
+            SummaryText.Text = presentMonStarted
+                ? $"PHASE 1 STARTED\n\nPresentMon raw CSV target:\n{_presentMonCaptureService.CurrentOutputFilePath}\n\nKeep Chrome active for 10 seconds, then click Stop Session."
+                : $"PHASE 1 FAILED TO START\n\nReason:\n{_presentMonCaptureService.LastStatusMessage}";
         }
 
         private void StopButton_Click(object sender, RoutedEventArgs e)
         {
+            string presentMonStatus = _presentMonCaptureService.StopAndGetPhase1Status();
+
             _sessionManager.StopSession();
 
             StatusText.Text = "Status: Session stopped";
 
             GenerateSessionSummary();
+
+            SummaryText.Text +=
+                "\n\n" +
+                presentMonStatus;
+
+            MessageBox.Show(
+                presentMonStatus,
+                "Phase 1 PresentMon Test",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information
+            );
         }
 
         private void GenerateSessionSummary()
@@ -436,6 +461,7 @@ namespace Gamepulse
 
         protected override void OnClosed(EventArgs e)
         {
+            _presentMonCaptureService.Cleanup();
             _systemMetricsCollector.Dispose();
             _diskMetricsCollector.Dispose();
             _gpuMetricsCollector.Dispose();
