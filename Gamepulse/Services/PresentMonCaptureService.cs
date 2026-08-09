@@ -18,14 +18,23 @@ namespace Gamepulse.Services
 
         public string? CurrentOutputFilePath { get; private set; }
         public string LastStatusMessage { get; private set; } = "";
+        public string TargetProcessName { get; private set; } = "";
 
-        public bool StartPhase1Capture(SessionInfo session)
+        public bool StartPhase1Capture(SessionInfo session, string targetProcessName)
         {
             Cleanup();
 
             _log.Clear();
             LastStatusMessage = "";
             CurrentOutputFilePath = null;
+            TargetProcessName = NormalizeProcessName(targetProcessName);
+
+            if (string.IsNullOrWhiteSpace(TargetProcessName))
+            {
+                LastStatusMessage = "No valid target process was provided.";
+                AddLog(LastStatusMessage);
+                return false;
+            }
 
             if (!File.Exists(PresentMonPath))
             {
@@ -50,11 +59,8 @@ namespace Gamepulse.Services
 
                 RunPresentMonCleanupCommand();
 
-                // Full-session capture:
-                // Start PresentMon now and let it run until Stop Session is clicked.
-                // No --timed argument here.
                 string arguments =
-                    "--process_name chrome.exe " +
+                    $"--process_name {TargetProcessName} " +
                     $"--output_file {CurrentOutputFilePath}";
 
                 AddLog($"Capture command: \"{PresentMonPath}\" {arguments}");
@@ -106,7 +112,7 @@ namespace Gamepulse.Services
                 _presentMonProcess.BeginOutputReadLine();
                 _presentMonProcess.BeginErrorReadLine();
 
-                LastStatusMessage = "PresentMon full-session capture started for chrome.exe.";
+                LastStatusMessage = $"PresentMon full-session capture started for {TargetProcessName}.";
                 AddLog(LastStatusMessage);
 
                 return true;
@@ -136,8 +142,6 @@ namespace Gamepulse.Services
                     {
                         try
                         {
-                            // PresentMon does not always exit cleanly when launched hidden,
-                            // so we stop it here and then allow time for CSV flush.
                             _presentMonProcess.Kill(true);
                             _presentMonProcess.WaitForExit(5000);
                             AddLog("PresentMon process stopped.");
@@ -155,7 +159,6 @@ namespace Gamepulse.Services
                     _presentMonProcess.Dispose();
                     _presentMonProcess = null;
 
-                    // Give Windows/PresentMon a moment to finalize the CSV.
                     Thread.Sleep(1500);
                 }
             }
@@ -251,6 +254,7 @@ namespace Gamepulse.Services
             if (!File.Exists(CurrentOutputFilePath))
             {
                 status.AppendLine("PresentMon output file was not created.");
+                status.AppendLine($"Target Process: {TargetProcessName}");
                 status.AppendLine($"Expected path: {CurrentOutputFilePath}");
                 status.AppendLine($"Last status: {LastStatusMessage}");
                 return status.ToString();
@@ -259,10 +263,28 @@ namespace Gamepulse.Services
             FileInfo fileInfo = new FileInfo(CurrentOutputFilePath);
 
             status.AppendLine("PresentMon output file created.");
+            status.AppendLine($"Target Process: {TargetProcessName}");
             status.AppendLine($"Path: {CurrentOutputFilePath}");
             status.AppendLine($"Size: {fileInfo.Length} bytes");
 
             return status.ToString();
+        }
+
+        private static string NormalizeProcessName(string processName)
+        {
+            if (string.IsNullOrWhiteSpace(processName))
+            {
+                return "";
+            }
+
+            string normalized = processName.Trim();
+
+            if (!normalized.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                normalized += ".exe";
+            }
+
+            return normalized;
         }
 
         private void AddLog(string message)

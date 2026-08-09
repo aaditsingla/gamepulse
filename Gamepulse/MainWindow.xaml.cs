@@ -35,7 +35,50 @@ namespace Gamepulse
         private List<ProcessCpuMetrics> _cachedTopCpuProcesses = new();
         private DateTime _lastTopProcessRefreshTime = DateTime.MinValue;
 
+        private ActiveProcessMetrics? _latestActiveProcessMetrics;
+        private string _lockedFrameTargetProcessName = "";
+
         private const int TopProcessRefreshSeconds = 5;
+        private const int FrameTargetDetectionDelaySeconds = 3;
+
+        private static readonly HashSet<string> IgnoredFrameTargetProcesses = new(
+            StringComparer.OrdinalIgnoreCase)
+        {
+            "Gamepulse",
+            "Gamepulse.exe",
+            "explorer",
+            "explorer.exe",
+            "dwm",
+            "dwm.exe",
+            "ApplicationFrameHost",
+            "ApplicationFrameHost.exe",
+            "ShellExperienceHost",
+            "ShellExperienceHost.exe",
+            "SearchHost",
+            "SearchHost.exe",
+            "TextInputHost",
+            "TextInputHost.exe",
+            "StartMenuExperienceHost",
+            "StartMenuExperienceHost.exe",
+            "SystemSettings",
+            "SystemSettings.exe",
+            "devenv",
+            "devenv.exe",
+            "taskmgr",
+            "taskmgr.exe",
+            "cmd",
+            "cmd.exe",
+            "powershell",
+            "powershell.exe",
+            "conhost",
+            "conhost.exe",
+            "WindowsTerminal",
+            "WindowsTerminal.exe",
+            "Discord",
+            "Discord.exe",
+            "Teams",
+            "Teams.exe"
+        };
 
         private class TelemetrySnapshot
         {
@@ -67,37 +110,67 @@ namespace Gamepulse
             StopButton.IsEnabled = false;
         }
 
-        private void StartButton_Click(object sender, RoutedEventArgs e)
+        private async void StartButton_Click(object sender, RoutedEventArgs e)
         {
             _samples.Clear();
             _cachedTopRamProcesses.Clear();
             _cachedTopCpuProcesses.Clear();
             _lastTopProcessRefreshTime = DateTime.MinValue;
+            _latestActiveProcessMetrics = null;
+            _lockedFrameTargetProcessName = "";
 
             _sessionManager.StartSession("Unknown");
             _csvTelemetryWriter.CreateSessionFile(_sessionManager.CurrentSession!);
-
-            bool presentMonStarted = _presentMonCaptureService.StartPhase1Capture(
-                _sessionManager.CurrentSession!
-            );
 
             StartTelemetrySampling();
 
             StartButton.IsEnabled = false;
             StopButton.IsEnabled = true;
 
-            StatusText.Text = presentMonStarted
-                ? "Status: Session running with PresentMon capture"
-                : "Status: Session running, PresentMon failed";
-
+            StatusText.Text = "Status: Session running. Waiting for frame target...";
             DurationText.Text = "Session Duration: 00:00:00";
             SamplesText.Text = "Samples Recorded: 0";
 
             SummaryText.Text = "Session is recording. System telemetry will appear here after stopping.";
+            FrameSummaryText.Text =
+                $"Frame target detection starts in {FrameTargetDetectionDelaySeconds} seconds.\n\n" +
+                "After clicking Start Session, switch to the game or rendering app you want to capture.\n" +
+                "GamePulse will lock onto that foreground process for this session.";
+
+            await Task.Delay(TimeSpan.FromSeconds(FrameTargetDetectionDelaySeconds));
+
+            if (!_sessionManager.IsRunning || _sessionManager.CurrentSession == null)
+            {
+                return;
+            }
+
+            string? targetProcessName = ResolveFrameTargetProcessName();
+
+            if (string.IsNullOrWhiteSpace(targetProcessName))
+            {
+                StatusText.Text = "Status: Session running, no valid frame target detected";
+
+                FrameSummaryText.Text =
+                    "Frame capture did not start because no valid target process was detected.\n\n" +
+                    "Try again and switch to your game window within 3 seconds after clicking Start Session.";
+
+                return;
+            }
+
+            _lockedFrameTargetProcessName = targetProcessName;
+
+            bool presentMonStarted = _presentMonCaptureService.StartPhase1Capture(
+                _sessionManager.CurrentSession,
+                _lockedFrameTargetProcessName
+            );
+
+            StatusText.Text = presentMonStarted
+                ? $"Status: Session running with frame target {_lockedFrameTargetProcessName}"
+                : "Status: Session running, PresentMon failed";
 
             FrameSummaryText.Text = presentMonStarted
-                ? $"Frame capture is recording.\n\nPresentMon raw CSV target:\n{_presentMonCaptureService.CurrentOutputFilePath}"
-                : $"Frame capture failed to start.\n\nReason:\n{_presentMonCaptureService.LastStatusMessage}";
+                ? $"Frame capture locked onto target:\n{_lockedFrameTargetProcessName}\n\nPresentMon raw CSV target:\n{_presentMonCaptureService.CurrentOutputFilePath}"
+                : $"Frame capture failed to start for target:\n{_lockedFrameTargetProcessName}\n\nReason:\n{_presentMonCaptureService.LastStatusMessage}";
         }
 
         private async void StopButton_Click(object sender, RoutedEventArgs e)
@@ -107,7 +180,9 @@ namespace Gamepulse
 
             StatusText.Text = "Status: Stopping session...";
             SummaryText.Text = "Stopping session and finalizing system telemetry.";
-            FrameSummaryText.Text = "Finalizing PresentMon frame capture. The app should stay responsive.";
+            FrameSummaryText.Text = string.IsNullOrWhiteSpace(_lockedFrameTargetProcessName)
+                ? "No frame capture target was locked for this session."
+                : $"Finalizing PresentMon frame capture for {_lockedFrameTargetProcessName}. The app should stay responsive.";
 
             _sessionManager.StopSession();
 
@@ -127,6 +202,43 @@ namespace Gamepulse
 
             StartButton.IsEnabled = true;
             StopButton.IsEnabled = false;
+        }
+
+        private string? ResolveFrameTargetProcessName()
+        {
+            string processName = _latestActiveProcessMetrics?.ProcessName ?? "";
+
+            if (string.IsNullOrWhiteSpace(processName))
+            {
+                return null;
+            }
+
+            string normalized = NormalizeProcessName(processName);
+
+            if (IgnoredFrameTargetProcesses.Contains(processName) ||
+                IgnoredFrameTargetProcesses.Contains(normalized))
+            {
+                return null;
+            }
+
+            return normalized;
+        }
+
+        private static string NormalizeProcessName(string processName)
+        {
+            if (string.IsNullOrWhiteSpace(processName))
+            {
+                return "";
+            }
+
+            string normalized = processName.Trim();
+
+            if (!normalized.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                normalized += ".exe";
+            }
+
+            return normalized;
         }
 
         private void StartTelemetrySampling()
@@ -316,6 +428,8 @@ namespace Gamepulse
 
         private void ApplyTelemetrySnapshot(TelemetrySnapshot snapshot)
         {
+            _latestActiveProcessMetrics = snapshot.ActiveProcessMetrics;
+
             CpuText.Text = $"{snapshot.SystemMetrics.CpuPercent:0}%";
 
             RamText.Text = $"{snapshot.SystemMetrics.Memory.UsedPercentage:0}%";
@@ -478,7 +592,7 @@ namespace Gamepulse
 
             builder.AppendLine($"FPS Summary: {summary.AverageFps:0.0} FPS | Avg FT {summary.AverageFrameTimeMs:0.00} ms | 1% Low {summary.OnePercentLowFps:0.0} FPS");
             builder.AppendLine();
-            builder.AppendLine($"Target Process: {summary.TargetProcessName}");
+            builder.AppendLine($"Locked Target Process: {summary.TargetProcessName}");
             builder.AppendLine($"Frame Rows Parsed: {summary.FrameCount}");
             builder.AppendLine($"Frame Capture Duration: {summary.CaptureDurationSeconds:0.00} sec");
             builder.AppendLine($"Average FPS: {summary.AverageFps:0.0}");
