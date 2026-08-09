@@ -300,7 +300,7 @@ namespace Gamepulse
 
             string sessionSummary = SummaryText.Text;
 
-            string presentMonStatus = await _presentMonCaptureService.StopAndGetPhase1StatusAsync();
+            await _presentMonCaptureService.StopAndGetPhase1StatusAsync();
 
             FrameMetricsSummary frameMetricsSummary = _presentMonFrameMetricsParser.Parse(
                 _presentMonCaptureService.CurrentOutputFilePath
@@ -313,8 +313,6 @@ namespace Gamepulse
                 compactFrameSummary +
                 "\n\n" +
                 sessionSummary +
-                "\n\n" +
-                presentMonStatus +
                 "\n\n" +
                 frameMetricsText;
 
