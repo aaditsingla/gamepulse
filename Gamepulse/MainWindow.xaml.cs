@@ -1,9 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Threading;
 using Gamepulse.Collectors;
 using Gamepulse.Models;
 using Gamepulse.Services;
@@ -12,7 +14,6 @@ namespace Gamepulse
 {
     public partial class MainWindow : Window
     {
-        private readonly DispatcherTimer _timer;
         private readonly SystemMetricsCollector _systemMetricsCollector;
         private readonly DiskMetricsCollector _diskMetricsCollector;
         private readonly GpuMetricsCollector _gpuMetricsCollector;
@@ -26,6 +27,26 @@ namespace Gamepulse
         private readonly CsvTelemetryWriter _csvTelemetryWriter;
 
         private readonly List<TelemetrySample> _samples = new();
+
+        private CancellationTokenSource? _samplingCancellationTokenSource;
+        private Task? _samplingTask;
+
+        private List<ProcessMemoryMetrics> _cachedTopRamProcesses = new();
+        private List<ProcessCpuMetrics> _cachedTopCpuProcesses = new();
+        private DateTime _lastTopProcessRefreshTime = DateTime.MinValue;
+
+        private const int TopProcessRefreshSeconds = 5;
+
+        private class TelemetrySnapshot
+        {
+            public SystemMetrics SystemMetrics { get; set; } = null!;
+            public DiskMetrics DiskMetrics { get; set; } = null!;
+            public GpuDeviceMetrics? Gpu0 { get; set; }
+            public GpuDeviceMetrics? Gpu1 { get; set; }
+            public ActiveProcessMetrics ActiveProcessMetrics { get; set; } = null!;
+            public int SampleCount { get; set; }
+            public TimeSpan Duration { get; set; }
+        }
 
         public MainWindow()
         {
@@ -43,13 +64,162 @@ namespace Gamepulse
             _sessionManager = new SessionManager();
             _csvTelemetryWriter = new CsvTelemetryWriter();
 
-            _timer = new DispatcherTimer();
-            _timer.Interval = TimeSpan.FromSeconds(1);
-            _timer.Tick += Timer_Tick;
-            _timer.Start();
+            StopButton.IsEnabled = false;
         }
 
-        private void Timer_Tick(object? sender, EventArgs e)
+        private void StartButton_Click(object sender, RoutedEventArgs e)
+        {
+            _samples.Clear();
+            _cachedTopRamProcesses.Clear();
+            _cachedTopCpuProcesses.Clear();
+            _lastTopProcessRefreshTime = DateTime.MinValue;
+
+            _sessionManager.StartSession("Unknown");
+            _csvTelemetryWriter.CreateSessionFile(_sessionManager.CurrentSession!);
+
+            bool presentMonStarted = _presentMonCaptureService.StartPhase1Capture(
+                _sessionManager.CurrentSession!
+            );
+
+            StartTelemetrySampling();
+
+            StartButton.IsEnabled = false;
+            StopButton.IsEnabled = true;
+
+            StatusText.Text = presentMonStarted
+                ? "Status: Session running with PresentMon capture"
+                : "Status: Session running, PresentMon failed";
+
+            DurationText.Text = "Session Duration: 00:00:00";
+            SamplesText.Text = "Samples Recorded: 0";
+
+            SummaryText.Text = "Session is recording. System telemetry will appear here after stopping.";
+
+            FrameSummaryText.Text = presentMonStarted
+                ? $"Frame capture is recording.\n\nPresentMon raw CSV target:\n{_presentMonCaptureService.CurrentOutputFilePath}"
+                : $"Frame capture failed to start.\n\nReason:\n{_presentMonCaptureService.LastStatusMessage}";
+        }
+
+        private async void StopButton_Click(object sender, RoutedEventArgs e)
+        {
+            StartButton.IsEnabled = false;
+            StopButton.IsEnabled = false;
+
+            StatusText.Text = "Status: Stopping session...";
+            SummaryText.Text = "Stopping session and finalizing system telemetry.";
+            FrameSummaryText.Text = "Finalizing PresentMon frame capture. The app should stay responsive.";
+
+            _sessionManager.StopSession();
+
+            await StopTelemetrySamplingAsync();
+
+            GenerateSessionSummary();
+
+            await _presentMonCaptureService.StopAndGetPhase1StatusAsync();
+
+            FrameMetricsSummary frameMetricsSummary = _presentMonFrameMetricsParser.Parse(
+                _presentMonCaptureService.CurrentOutputFilePath
+            );
+
+            FrameSummaryText.Text = FormatFrameSummaryPanel(frameMetricsSummary);
+
+            StatusText.Text = "Status: Session stopped";
+
+            StartButton.IsEnabled = true;
+            StopButton.IsEnabled = false;
+        }
+
+        private void StartTelemetrySampling()
+        {
+            _samplingCancellationTokenSource?.Cancel();
+            _samplingCancellationTokenSource?.Dispose();
+
+            _samplingCancellationTokenSource = new CancellationTokenSource();
+            CancellationToken token = _samplingCancellationTokenSource.Token;
+
+            _samplingTask = RunTelemetrySamplingLoopAsync(token);
+        }
+
+        private async Task StopTelemetrySamplingAsync()
+        {
+            CancellationTokenSource? cancellationTokenSource = _samplingCancellationTokenSource;
+            Task? samplingTask = _samplingTask;
+
+            if (cancellationTokenSource != null)
+            {
+                cancellationTokenSource.Cancel();
+            }
+
+            if (samplingTask != null)
+            {
+                try
+                {
+                    await samplingTask;
+                }
+                catch (OperationCanceledException)
+                {
+                }
+                catch
+                {
+                }
+            }
+
+            cancellationTokenSource?.Dispose();
+            _samplingCancellationTokenSource = null;
+            _samplingTask = null;
+        }
+
+        private async Task RunTelemetrySamplingLoopAsync(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                Stopwatch stopwatch = Stopwatch.StartNew();
+
+                try
+                {
+                    TelemetrySnapshot snapshot = await Task.Run(
+                        CollectTelemetrySnapshot,
+                        token
+                    );
+
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        ApplyTelemetrySnapshot(snapshot);
+                    });
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception exception)
+                {
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        StatusText.Text = $"Status: Sampling error - {exception.Message}";
+                    });
+                }
+
+                stopwatch.Stop();
+
+                int delayMs = 1000 - (int)stopwatch.ElapsedMilliseconds;
+
+                if (delayMs < 50)
+                {
+                    delayMs = 50;
+                }
+
+                try
+                {
+                    await Task.Delay(delayMs, token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+            }
+        }
+
+        private TelemetrySnapshot CollectTelemetrySnapshot()
         {
             SystemMetrics systemMetrics = _systemMetricsCollector.Collect();
             DiskMetrics diskMetrics = _diskMetricsCollector.Collect();
@@ -57,11 +227,10 @@ namespace Gamepulse
             WindowsGpuEngineMetrics windowsGpuEngineMetrics = _windowsGpuEngineCollector.Collect();
             ActiveProcessMetrics activeProcessMetrics = _activeGameDetector.Collect();
 
-            List<ProcessMemoryMetrics> topRamProcesses = _topRamProcessCollector.CollectTopProcesses(5);
-            List<ProcessCpuMetrics> topCpuProcesses = _topCpuProcessCollector.CollectTopProcesses(5);
+            RefreshTopProcessCachesIfNeeded();
 
-            string topRamProcessesText = FormatTopRamProcesses(topRamProcesses);
-            string topCpuProcessesText = FormatTopCpuProcesses(topCpuProcesses);
+            string topRamProcessesText = FormatTopRamProcesses(_cachedTopRamProcesses);
+            string topCpuProcessesText = FormatTopCpuProcesses(_cachedTopCpuProcesses);
 
             GpuDeviceMetrics? dedicatedGpu = GetDedicatedGpu(gpuMetrics);
             GpuDeviceMetrics? integratedGpu = GetIntegratedGpu(gpuMetrics);
@@ -74,22 +243,8 @@ namespace Gamepulse
             GpuDeviceMetrics? gpu0 = integratedGpu;
             GpuDeviceMetrics? gpu1 = dedicatedGpu;
 
-            CpuText.Text = $"{systemMetrics.CpuPercent:0}%";
-            RamText.Text = $"{systemMetrics.Memory.UsedPercentage:0}%";
-            RamDetailsText.Text = $"{systemMetrics.Memory.UsedGb:0.0} GB / {systemMetrics.Memory.TotalGb:0.0} GB";
-
-            DiskText.Text = $"{diskMetrics.ActivePercent:0}%";
-            DiskDetailsText.Text = $"Read {diskMetrics.ReadMBps:0.0} MB/s | Write {diskMetrics.WriteMBps:0.0} MB/s";
-
-            UpdateGpuCards(gpu0, gpu1);
-            UpdateActiveProcessCard(activeProcessMetrics);
-
             if (_sessionManager.IsRunning && _sessionManager.CurrentSession != null)
             {
-                TimeSpan duration = _sessionManager.GetDuration();
-
-                DurationText.Text = $"Session Duration: {duration:hh\\:mm\\:ss}";
-
                 TelemetrySample sample = new TelemetrySample
                 {
                     SessionId = _sessionManager.CurrentSession.SessionId,
@@ -128,9 +283,54 @@ namespace Gamepulse
 
                 _samples.Add(sample);
                 _csvTelemetryWriter.WriteSample(sample);
-
-                SamplesText.Text = $"Samples Recorded: {_samples.Count}";
             }
+
+            return new TelemetrySnapshot
+            {
+                SystemMetrics = systemMetrics,
+                DiskMetrics = diskMetrics,
+                Gpu0 = gpu0,
+                Gpu1 = gpu1,
+                ActiveProcessMetrics = activeProcessMetrics,
+                SampleCount = _samples.Count,
+                Duration = _sessionManager.GetDuration()
+            };
+        }
+
+        private void RefreshTopProcessCachesIfNeeded()
+        {
+            bool shouldRefresh =
+                _cachedTopRamProcesses.Count == 0 ||
+                _cachedTopCpuProcesses.Count == 0 ||
+                (DateTime.Now - _lastTopProcessRefreshTime).TotalSeconds >= TopProcessRefreshSeconds;
+
+            if (!shouldRefresh)
+            {
+                return;
+            }
+
+            _cachedTopRamProcesses = _topRamProcessCollector.CollectTopProcesses(5);
+            _cachedTopCpuProcesses = _topCpuProcessCollector.CollectTopProcesses(5);
+            _lastTopProcessRefreshTime = DateTime.Now;
+        }
+
+        private void ApplyTelemetrySnapshot(TelemetrySnapshot snapshot)
+        {
+            CpuText.Text = $"{snapshot.SystemMetrics.CpuPercent:0}%";
+
+            RamText.Text = $"{snapshot.SystemMetrics.Memory.UsedPercentage:0}%";
+            RamDetailsText.Text =
+                $"{snapshot.SystemMetrics.Memory.UsedGb:0.0} GB / {snapshot.SystemMetrics.Memory.TotalGb:0.0} GB";
+
+            DiskText.Text = $"{snapshot.DiskMetrics.ActivePercent:0}%";
+            DiskDetailsText.Text =
+                $"Read {snapshot.DiskMetrics.ReadMBps:0.0} MB/s | Write {snapshot.DiskMetrics.WriteMBps:0.0} MB/s";
+
+            UpdateGpuCards(snapshot.Gpu0, snapshot.Gpu1);
+            UpdateActiveProcessCard(snapshot.ActiveProcessMetrics);
+
+            DurationText.Text = $"Session Duration: {snapshot.Duration:hh\\:mm\\:ss}";
+            SamplesText.Text = $"Samples Recorded: {snapshot.SampleCount}";
         }
 
         private static string FormatTopRamProcesses(List<ProcessMemoryMetrics> processes)
@@ -261,60 +461,6 @@ namespace Gamepulse
             return $"{gpu.Name}{temperatureText}{vramText}";
         }
 
-        private void StartButton_Click(object sender, RoutedEventArgs e)
-        {
-            _samples.Clear();
-
-            _sessionManager.StartSession("Unknown");
-            _csvTelemetryWriter.CreateSessionFile(_sessionManager.CurrentSession!);
-
-            bool presentMonStarted = _presentMonCaptureService.StartPhase1Capture(
-                _sessionManager.CurrentSession!
-            );
-
-            StartButton.IsEnabled = false;
-            StopButton.IsEnabled = true;
-
-            StatusText.Text = presentMonStarted
-                ? "Status: Session running with PresentMon capture"
-                : "Status: Session running, PresentMon failed";
-
-            DurationText.Text = "Session Duration: 00:00:00";
-            SamplesText.Text = "Samples Recorded: 0";
-
-            SummaryText.Text = "Session is recording. System telemetry will appear here after stopping.";
-            FrameSummaryText.Text = presentMonStarted
-                ? $"Frame capture is recording.\n\nPresentMon raw CSV target:\n{_presentMonCaptureService.CurrentOutputFilePath}"
-                : $"Frame capture failed to start.\n\nReason:\n{_presentMonCaptureService.LastStatusMessage}";
-        }
-
-        private async void StopButton_Click(object sender, RoutedEventArgs e)
-        {
-            StartButton.IsEnabled = false;
-            StopButton.IsEnabled = false;
-
-            StatusText.Text = "Status: Stopping session...";
-            SummaryText.Text = "Stopping session and finalizing system telemetry.";
-            FrameSummaryText.Text = "Finalizing PresentMon frame capture. The app should stay responsive.";
-
-            _sessionManager.StopSession();
-
-            GenerateSessionSummary();
-
-            await _presentMonCaptureService.StopAndGetPhase1StatusAsync();
-
-            FrameMetricsSummary frameMetricsSummary = _presentMonFrameMetricsParser.Parse(
-                _presentMonCaptureService.CurrentOutputFilePath
-            );
-
-            FrameSummaryText.Text = FormatFrameSummaryPanel(frameMetricsSummary);
-
-            StatusText.Text = "Status: Session stopped";
-
-            StartButton.IsEnabled = true;
-            StopButton.IsEnabled = true;
-        }
-
         private static string FormatFrameSummaryPanel(FrameMetricsSummary summary)
         {
             if (summary.FrameCount == 0)
@@ -379,21 +525,11 @@ namespace Gamepulse
             double averageRam = _samples.Average(sample => sample.RamPercent);
             double peakRam = _samples.Max(sample => sample.RamPercent);
 
-            double averageDiskActive = _samples
-                .Where(sample => sample.DiskActivePercent.HasValue)
-                .Average(sample => sample.DiskActivePercent!.Value);
+            double? averageDiskActive = AverageNullable(_samples.Select(sample => sample.DiskActivePercent));
+            double? peakDiskActive = MaxNullable(_samples.Select(sample => sample.DiskActivePercent));
 
-            double peakDiskActive = _samples
-                .Where(sample => sample.DiskActivePercent.HasValue)
-                .Max(sample => sample.DiskActivePercent!.Value);
-
-            double peakDiskRead = _samples
-                .Where(sample => sample.DiskReadMBps.HasValue)
-                .Max(sample => sample.DiskReadMBps!.Value);
-
-            double peakDiskWrite = _samples
-                .Where(sample => sample.DiskWriteMBps.HasValue)
-                .Max(sample => sample.DiskWriteMBps!.Value);
+            double? peakDiskRead = MaxNullable(_samples.Select(sample => sample.DiskReadMBps));
+            double? peakDiskWrite = MaxNullable(_samples.Select(sample => sample.DiskWriteMBps));
 
             double? averageGpu0 = AverageNullable(_samples.Select(sample => sample.Gpu0UsagePercent));
             double? peakGpu0 = MaxNullable(_samples.Select(sample => sample.Gpu0UsagePercent));
@@ -427,10 +563,10 @@ namespace Gamepulse
                 $"Peak CPU: {peakCpu:0}%\n" +
                 $"Average RAM: {averageRam:0}%\n" +
                 $"Peak RAM: {peakRam:0}%\n" +
-                $"Average Disk Active: {averageDiskActive:0}%\n" +
-                $"Peak Disk Active: {peakDiskActive:0}%\n" +
-                $"Peak Disk Read: {peakDiskRead:0.0} MB/s\n" +
-                $"Peak Disk Write: {peakDiskWrite:0.0} MB/s\n" +
+                $"Average Disk Active: {FormatNullablePercent(averageDiskActive)}\n" +
+                $"Peak Disk Active: {FormatNullablePercent(peakDiskActive)}\n" +
+                $"Peak Disk Read: {FormatNullableNumber(peakDiskRead)} MB/s\n" +
+                $"Peak Disk Write: {FormatNullableNumber(peakDiskWrite)} MB/s\n" +
                 $"Average GPU 0: {FormatNullablePercent(averageGpu0)}\n" +
                 $"Peak GPU 0: {FormatNullablePercent(peakGpu0)}\n" +
                 $"Average GPU 1: {FormatNullablePercent(averageGpu1)}\n" +
@@ -521,13 +657,29 @@ namespace Gamepulse
             return value.HasValue ? $"{value.Value:0.0}%" : "N/A";
         }
 
+        private static string FormatNullableNumber(double? value)
+        {
+            return value.HasValue ? $"{value.Value:0.0}" : "N/A";
+        }
+
         protected override void OnClosed(EventArgs e)
         {
+            _samplingCancellationTokenSource?.Cancel();
+
+            try
+            {
+                _samplingTask?.Wait(2000);
+            }
+            catch
+            {
+            }
+
             _presentMonCaptureService.Cleanup();
             _systemMetricsCollector.Dispose();
             _diskMetricsCollector.Dispose();
             _gpuMetricsCollector.Dispose();
             _windowsGpuEngineCollector.Dispose();
+
             base.OnClosed(e);
         }
     }
