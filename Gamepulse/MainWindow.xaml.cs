@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Windows;
 using System.Windows.Threading;
 using Gamepulse.Collectors;
@@ -281,9 +282,10 @@ namespace Gamepulse
             DurationText.Text = "Session Duration: 00:00:00";
             SamplesText.Text = "Samples Recorded: 0";
 
-            SummaryText.Text = presentMonStarted
-                ? $"Session is recording.\n\nPresentMon raw CSV target:\n{_presentMonCaptureService.CurrentOutputFilePath}"
-                : $"Session is recording, but PresentMon failed to start.\n\nReason:\n{_presentMonCaptureService.LastStatusMessage}";
+            SummaryText.Text = "Session is recording. System telemetry will appear here after stopping.";
+            FrameSummaryText.Text = presentMonStarted
+                ? $"Frame capture is recording.\n\nPresentMon raw CSV target:\n{_presentMonCaptureService.CurrentOutputFilePath}"
+                : $"Frame capture failed to start.\n\nReason:\n{_presentMonCaptureService.LastStatusMessage}";
         }
 
         private async void StopButton_Click(object sender, RoutedEventArgs e)
@@ -292,13 +294,12 @@ namespace Gamepulse
             StopButton.IsEnabled = false;
 
             StatusText.Text = "Status: Stopping session...";
-            SummaryText.Text = "Stopping session and finalizing PresentMon capture. The app should stay responsive.";
+            SummaryText.Text = "Stopping session and finalizing system telemetry.";
+            FrameSummaryText.Text = "Finalizing PresentMon frame capture. The app should stay responsive.";
 
             _sessionManager.StopSession();
 
             GenerateSessionSummary();
-
-            string sessionSummary = SummaryText.Text;
 
             await _presentMonCaptureService.StopAndGetPhase1StatusAsync();
 
@@ -306,15 +307,7 @@ namespace Gamepulse
                 _presentMonCaptureService.CurrentOutputFilePath
             );
 
-            string compactFrameSummary = FormatCompactFrameSummary(frameMetricsSummary);
-            string frameMetricsText = _presentMonFrameMetricsParser.FormatSummary(frameMetricsSummary);
-
-            SummaryText.Text =
-                compactFrameSummary +
-                "\n\n" +
-                sessionSummary +
-                "\n\n" +
-                frameMetricsText;
+            FrameSummaryText.Text = FormatFrameSummaryPanel(frameMetricsSummary);
 
             StatusText.Text = "Status: Session stopped";
 
@@ -322,19 +315,54 @@ namespace Gamepulse
             StopButton.IsEnabled = true;
         }
 
-        private static string FormatCompactFrameSummary(FrameMetricsSummary summary)
+        private static string FormatFrameSummaryPanel(FrameMetricsSummary summary)
         {
             if (summary.FrameCount == 0)
             {
-                return "FPS Summary: No valid PresentMon frame rows parsed";
+                return
+                    "FPS Summary: No valid PresentMon frame rows parsed\n\n" +
+                    $"Source File: {summary.SourceFilePath}";
             }
 
-            return
-                $"FPS Summary: {summary.AverageFps:0.0} FPS | " +
-                $"Avg FT {summary.AverageFrameTimeMs:0.00} ms | " +
-                $"Worst FT {summary.WorstFrameTimeMs:0.00} ms | " +
-                $"1% Low {summary.OnePercentLowFps:0.0} FPS | " +
-                $"Frames {summary.FrameCount}";
+            StringBuilder builder = new();
+
+            int totalBuckets = summary.PerSecondMetrics.Count;
+            int firstBucket = totalBuckets > 0 ? summary.PerSecondMetrics.First().Second : 0;
+            int lastBucket = totalBuckets > 0 ? summary.PerSecondMetrics.Last().Second : 0;
+
+            builder.AppendLine($"FPS Summary: {summary.AverageFps:0.0} FPS | Avg FT {summary.AverageFrameTimeMs:0.00} ms | 1% Low {summary.OnePercentLowFps:0.0} FPS");
+            builder.AppendLine();
+            builder.AppendLine($"Target Process: {summary.TargetProcessName}");
+            builder.AppendLine($"Frame Rows Parsed: {summary.FrameCount}");
+            builder.AppendLine($"Frame Capture Duration: {summary.CaptureDurationSeconds:0.00} sec");
+            builder.AppendLine($"Average FPS: {summary.AverageFps:0.0}");
+            builder.AppendLine($"Average Frame Time: {summary.AverageFrameTimeMs:0.00} ms");
+            builder.AppendLine($"Worst Frame Time: {summary.WorstFrameTimeMs:0.00} ms");
+            builder.AppendLine($"1% Low FPS Estimate: {summary.OnePercentLowFps:0.0}");
+            builder.AppendLine($"0.1% Low FPS Estimate: {summary.ZeroPointOnePercentLowFps:0.0}");
+            builder.AppendLine();
+            builder.AppendLine($"Per-Second Buckets: {totalBuckets}");
+            builder.AppendLine($"First Captured Bucket: Second {firstBucket}");
+            builder.AppendLine($"Last Captured Bucket: Second {lastBucket}");
+            builder.AppendLine();
+            builder.AppendLine("All Per-Second Buckets:");
+
+            foreach (FrameSecondMetrics second in summary.PerSecondMetrics)
+            {
+                builder.AppendLine(
+                    $"Second {second.Second}: " +
+                    $"{second.FrameCount} frames | " +
+                    $"Avg FPS {second.AverageFps:0.0} | " +
+                    $"Avg FT {second.AverageFrameTimeMs:0.00} ms | " +
+                    $"Worst FT {second.WorstFrameTimeMs:0.00} ms | " +
+                    $"1% Low {second.OnePercentLowFps:0.0}"
+                );
+            }
+
+            builder.AppendLine();
+            builder.AppendLine($"Source File: {summary.SourceFilePath}");
+
+            return builder.ToString();
         }
 
         private void GenerateSessionSummary()

@@ -2,8 +2,8 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="GamePulse AI"
-        Height="950"
-        Width="1150"
+        Height="1000"
+        Width="1250"
         WindowStartupLocation="CenterScreen"
         Background="#111827">
 
@@ -239,36 +239,75 @@
             </StackPanel>
         </Border>
 
-        <Border Grid.Row="5"
-                Background="#1F2937"
-                CornerRadius="12"
-                Padding="24">
+        <Grid Grid.Row="5">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
 
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="*"/>
-                </Grid.RowDefinitions>
+            <Border Grid.Column="0"
+                    Background="#1F2937"
+                    CornerRadius="12"
+                    Padding="24"
+                    Margin="0,0,12,0">
 
-                <TextBlock Grid.Row="0"
-                           Text="Session Summary"
-                           Foreground="White"
-                           FontSize="22"
-                           FontWeight="Bold"
-                           Margin="0,0,0,12"/>
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
 
-                <ScrollViewer Grid.Row="1"
-                              VerticalScrollBarVisibility="Auto"
-                              HorizontalScrollBarVisibility="Disabled"
-                              CanContentScroll="True">
+                    <TextBlock Grid.Row="0"
+                               Text="Session Summary"
+                               Foreground="White"
+                               FontSize="22"
+                               FontWeight="Bold"
+                               Margin="0,0,0,12"/>
 
-                    <TextBlock x:Name="SummaryText"
-                               Text="No session summary yet. Start and stop a session to generate one."
-                               Foreground="#D1D5DB"
-                               FontSize="15"
-                               TextWrapping="Wrap"/>
-                </ScrollViewer>
-            </Grid>
-        </Border>
+                    <ScrollViewer Grid.Row="1"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+
+                        <TextBlock x:Name="SummaryText"
+                                   Text="No session summary yet. Start and stop a session to generate one."
+                                   Foreground="#D1D5DB"
+                                   FontSize="15"
+                                   TextWrapping="Wrap"/>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+
+            <Border Grid.Column="1"
+                    Background="#1F2937"
+                    CornerRadius="12"
+                    Padding="24"
+                    Margin="12,0,0,0">
+
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0"
+                               Text="Frame Summary"
+                               Foreground="White"
+                               FontSize="22"
+                               FontWeight="Bold"
+                               Margin="0,0,0,12"/>
+
+                    <ScrollViewer Grid.Row="1"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+
+                        <TextBlock x:Name="FrameSummaryText"
+                                   Text="No frame summary yet. PresentMon FPS data will appear here after a session."
+                                   Foreground="#D1D5DB"
+                                   FontSize="15"
+                                   TextWrapping="Wrap"/>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+        </Grid>
     </Grid>
 </Window>

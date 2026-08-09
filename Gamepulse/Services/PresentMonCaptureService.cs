@@ -50,10 +50,12 @@ namespace Gamepulse.Services
 
                 RunPresentMonCleanupCommand();
 
+                // Full-session capture:
+                // Start PresentMon now and let it run until Stop Session is clicked.
+                // No --timed argument here.
                 string arguments =
                     "--process_name chrome.exe " +
-                    $"--output_file {CurrentOutputFilePath} " +
-                    "--timed 10";
+                    $"--output_file {CurrentOutputFilePath}";
 
                 AddLog($"Capture command: \"{PresentMonPath}\" {arguments}");
 
@@ -104,7 +106,7 @@ namespace Gamepulse.Services
                 _presentMonProcess.BeginOutputReadLine();
                 _presentMonProcess.BeginErrorReadLine();
 
-                LastStatusMessage = "PresentMon Phase 1 capture started for chrome.exe.";
+                LastStatusMessage = "PresentMon full-session capture started for chrome.exe.";
                 AddLog(LastStatusMessage);
 
                 return true;
@@ -128,33 +130,32 @@ namespace Gamepulse.Services
             {
                 if (_presentMonProcess != null)
                 {
-                    AddLog("Waiting for PresentMon timed capture to finish.");
+                    AddLog("Stopping PresentMon full-session capture.");
 
-                    bool exited = _presentMonProcess.WaitForExit(15000);
-
-                    if (exited)
+                    if (!_presentMonProcess.HasExited)
                     {
-                        AddLog($"PresentMon exited with code {_presentMonProcess.ExitCode}.");
-                    }
-                    else
-                    {
-                        AddLog("PresentMon did not exit by itself after timed capture.");
-
                         try
                         {
-                            AddLog("Killing PresentMon after timed capture so it can flush and release.");
+                            // PresentMon does not always exit cleanly when launched hidden,
+                            // so we stop it here and then allow time for CSV flush.
                             _presentMonProcess.Kill(true);
-                            _presentMonProcess.WaitForExit(3000);
+                            _presentMonProcess.WaitForExit(5000);
+                            AddLog("PresentMon process stopped.");
                         }
                         catch (Exception killException)
                         {
-                            AddLog("Kill failed: " + killException.Message);
+                            AddLog("Stop/kill failed: " + killException.Message);
                         }
+                    }
+                    else
+                    {
+                        AddLog($"PresentMon had already exited with code {_presentMonProcess.ExitCode}.");
                     }
 
                     _presentMonProcess.Dispose();
                     _presentMonProcess = null;
 
+                    // Give Windows/PresentMon a moment to finalize the CSV.
                     Thread.Sleep(1500);
                 }
             }
@@ -238,15 +239,12 @@ namespace Gamepulse.Services
         {
             StringBuilder status = new();
 
-            status.AppendLine("Phase 1 PresentMon Status");
+            status.AppendLine("PresentMon Capture Status");
             status.AppendLine();
 
             if (string.IsNullOrWhiteSpace(CurrentOutputFilePath))
             {
                 status.AppendLine("Output path is empty.");
-                status.AppendLine();
-                status.AppendLine("Log:");
-                status.AppendLine(_log.ToString());
                 return status.ToString();
             }
 
@@ -255,9 +253,6 @@ namespace Gamepulse.Services
                 status.AppendLine("PresentMon output file was not created.");
                 status.AppendLine($"Expected path: {CurrentOutputFilePath}");
                 status.AppendLine($"Last status: {LastStatusMessage}");
-                status.AppendLine();
-                status.AppendLine("Log:");
-                status.AppendLine(_log.ToString());
                 return status.ToString();
             }
 
@@ -266,43 +261,8 @@ namespace Gamepulse.Services
             status.AppendLine("PresentMon output file created.");
             status.AppendLine($"Path: {CurrentOutputFilePath}");
             status.AppendLine($"Size: {fileInfo.Length} bytes");
-            status.AppendLine($"Header Preview: {GetHeaderPreview(CurrentOutputFilePath)}");
-            status.AppendLine($"Last status: {LastStatusMessage}");
-            status.AppendLine();
-            status.AppendLine("Log:");
-            status.AppendLine(_log.ToString());
 
             return status.ToString();
-        }
-
-        private static string GetHeaderPreview(string filePath)
-        {
-            try
-            {
-                using FileStream fileStream = new FileStream(
-                    filePath,
-                    FileMode.Open,
-                    FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete
-                );
-
-                using StreamReader reader = new StreamReader(fileStream);
-
-                string? header = reader.ReadLine();
-
-                if (string.IsNullOrWhiteSpace(header))
-                {
-                    return "File exists, but header is empty.";
-                }
-
-                return header.Length > 220
-                    ? header.Substring(0, 220) + "..."
-                    : header;
-            }
-            catch (Exception exception)
-            {
-                return "Could not read header: " + exception.Message;
-            }
         }
 
         private void AddLog(string message)
