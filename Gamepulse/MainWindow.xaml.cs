@@ -269,38 +269,46 @@ namespace Gamepulse
                 _sessionManager.CurrentSession!
             );
 
+            StartButton.IsEnabled = false;
+            StopButton.IsEnabled = true;
+
             StatusText.Text = presentMonStarted
-                ? "Status: Session running with Phase 1 PresentMon capture"
+                ? "Status: Session running with PresentMon capture"
                 : "Status: Session running, PresentMon failed";
 
             DurationText.Text = "Session Duration: 00:00:00";
             SamplesText.Text = "Samples Recorded: 0";
 
             SummaryText.Text = presentMonStarted
-                ? $"PHASE 1 STARTED\n\nPresentMon raw CSV target:\n{_presentMonCaptureService.CurrentOutputFilePath}\n\nKeep Chrome active for 10 seconds, then click Stop Session."
-                : $"PHASE 1 FAILED TO START\n\nReason:\n{_presentMonCaptureService.LastStatusMessage}";
+                ? $"Session is recording.\n\nPresentMon raw CSV target:\n{_presentMonCaptureService.CurrentOutputFilePath}"
+                : $"Session is recording, but PresentMon failed to start.\n\nReason:\n{_presentMonCaptureService.LastStatusMessage}";
         }
 
-        private void StopButton_Click(object sender, RoutedEventArgs e)
+        private async void StopButton_Click(object sender, RoutedEventArgs e)
         {
-            string presentMonStatus = _presentMonCaptureService.StopAndGetPhase1Status();
+            StartButton.IsEnabled = false;
+            StopButton.IsEnabled = false;
+
+            StatusText.Text = "Status: Stopping session...";
+            SummaryText.Text = "Stopping session and finalizing PresentMon capture. The app should stay responsive.";
 
             _sessionManager.StopSession();
 
-            StatusText.Text = "Status: Session stopped";
-
             GenerateSessionSummary();
 
-            SummaryText.Text +=
+            string sessionSummary = SummaryText.Text;
+
+            string presentMonStatus = await _presentMonCaptureService.StopAndGetPhase1StatusAsync();
+
+            SummaryText.Text =
+                sessionSummary +
                 "\n\n" +
                 presentMonStatus;
 
-            MessageBox.Show(
-                presentMonStatus,
-                "Phase 1 PresentMon Test",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information
-            );
+            StatusText.Text = "Status: Session stopped";
+
+            StartButton.IsEnabled = true;
+            StopButton.IsEnabled = true;
         }
 
         private void GenerateSessionSummary()

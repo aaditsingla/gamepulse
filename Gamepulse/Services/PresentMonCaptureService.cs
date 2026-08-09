@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Gamepulse.Models;
 
 namespace Gamepulse.Services
@@ -116,7 +117,12 @@ namespace Gamepulse.Services
             }
         }
 
-        public string StopAndGetPhase1Status()
+        public Task<string> StopAndGetPhase1StatusAsync()
+        {
+            return Task.Run(StopAndGetPhase1Status);
+        }
+
+        private string StopAndGetPhase1Status()
         {
             try
             {
