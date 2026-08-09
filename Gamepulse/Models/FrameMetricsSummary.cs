@@ -13,6 +13,7 @@ namespace Gamepulse.Models
         public double WorstFrameTimeMs { get; set; }
         public double OnePercentLowFps { get; set; }
         public double ZeroPointOnePercentLowFps { get; set; }
+        public int TotalStutterCount { get; set; }
 
         public List<FrameSecondMetrics> PerSecondMetrics { get; set; } = new();
     }

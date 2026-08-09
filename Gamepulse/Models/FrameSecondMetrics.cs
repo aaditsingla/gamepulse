@@ -9,5 +9,6 @@
         public double WorstFrameTimeMs { get; set; }
         public double OnePercentLowFps { get; set; }
         public double ZeroPointOnePercentLowFps { get; set; }
+        public int StutterCount { get; set; }
     }
 }

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using Gamepulse.Models;
@@ -34,6 +35,26 @@ namespace Gamepulse.Services
             }
 
             File.AppendAllText(CurrentFilePath, FormatSample(sample) + Environment.NewLine);
+        }
+
+        public void RewriteSessionFile(IEnumerable<TelemetrySample> samples)
+        {
+            if (string.IsNullOrWhiteSpace(CurrentFilePath))
+            {
+                return;
+            }
+
+            List<string> lines = new()
+            {
+                GetHeader()
+            };
+
+            foreach (TelemetrySample sample in samples)
+            {
+                lines.Add(FormatSample(sample));
+            }
+
+            File.WriteAllLines(CurrentFilePath, lines);
         }
 
         private static string GetHeader()

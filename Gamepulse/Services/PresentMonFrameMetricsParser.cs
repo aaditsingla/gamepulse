@@ -10,6 +10,8 @@ namespace Gamepulse.Services
 {
     public class PresentMonFrameMetricsParser
     {
+        private const double StutterFrameTimeThresholdMs = 50.0;
+
         private class RawFrameRecord
         {
             public string Application { get; set; } = "";
@@ -66,6 +68,7 @@ namespace Gamepulse.Services
             summary.WorstFrameTimeMs = frameTimes.Max();
             summary.OnePercentLowFps = CalculateLowFps(frameTimes, 0.01);
             summary.ZeroPointOnePercentLowFps = CalculateLowFps(frameTimes, 0.001);
+            summary.TotalStutterCount = frameTimes.Count(value => value >= StutterFrameTimeThresholdMs);
 
             summary.PerSecondMetrics = BuildPerSecondMetrics(records, firstTimeMs);
 
@@ -94,6 +97,7 @@ namespace Gamepulse.Services
             builder.AppendLine($"Worst Frame Time: {summary.WorstFrameTimeMs:0.00} ms");
             builder.AppendLine($"1% Low FPS Estimate: {summary.OnePercentLowFps:0.0}");
             builder.AppendLine($"0.1% Low FPS Estimate: {summary.ZeroPointOnePercentLowFps:0.0}");
+            builder.AppendLine($"Total Stutter Count: {summary.TotalStutterCount}");
             builder.AppendLine();
             builder.AppendLine("Per-Second Bucket Preview:");
 
@@ -104,7 +108,8 @@ namespace Gamepulse.Services
                     $"{second.FrameCount} frames | " +
                     $"Avg FPS {second.AverageFps:0.0} | " +
                     $"Avg FT {second.AverageFrameTimeMs:0.00} ms | " +
-                    $"Worst FT {second.WorstFrameTimeMs:0.00} ms"
+                    $"Worst FT {second.WorstFrameTimeMs:0.00} ms | " +
+                    $"Stutters {second.StutterCount}"
                 );
             }
 
@@ -220,7 +225,8 @@ namespace Gamepulse.Services
                         AverageFps = CalculateFpsFromFrameTime(averageFrameTime),
                         WorstFrameTimeMs = frameTimes.Count > 0 ? frameTimes.Max() : 0,
                         OnePercentLowFps = CalculateLowFps(frameTimes, 0.01),
-                        ZeroPointOnePercentLowFps = CalculateLowFps(frameTimes, 0.001)
+                        ZeroPointOnePercentLowFps = CalculateLowFps(frameTimes, 0.001),
+                        StutterCount = frameTimes.Count(value => value >= StutterFrameTimeThresholdMs)
                     };
                 })
                 .ToList();

@@ -37,6 +37,7 @@ namespace Gamepulse
 
         private ActiveProcessMetrics? _latestActiveProcessMetrics;
         private string _lockedFrameTargetProcessName = "";
+        private int _frameCaptureStartElapsedSeconds = -1;
 
         private const int TopProcessRefreshSeconds = 5;
         private const int FrameTargetDetectionDelaySeconds = 3;
@@ -118,6 +119,7 @@ namespace Gamepulse
             _lastTopProcessRefreshTime = DateTime.MinValue;
             _latestActiveProcessMetrics = null;
             _lockedFrameTargetProcessName = "";
+            _frameCaptureStartElapsedSeconds = -1;
 
             _sessionManager.StartSession("Unknown");
             _csvTelemetryWriter.CreateSessionFile(_sessionManager.CurrentSession!);
@@ -158,6 +160,7 @@ namespace Gamepulse
             }
 
             _lockedFrameTargetProcessName = targetProcessName;
+            _frameCaptureStartElapsedSeconds = _sessionManager.GetElapsedSeconds();
 
             bool presentMonStarted = _presentMonCaptureService.StartPhase1Capture(
                 _sessionManager.CurrentSession,
@@ -196,12 +199,50 @@ namespace Gamepulse
                 _presentMonCaptureService.CurrentOutputFilePath
             );
 
+            ApplyFrameMetricsToTelemetrySamples(frameMetricsSummary);
+
+            _csvTelemetryWriter.RewriteSessionFile(_samples);
+
+            GenerateSessionSummary();
+
             FrameSummaryText.Text = FormatFrameSummaryPanel(frameMetricsSummary);
 
             StatusText.Text = "Status: Session stopped";
 
             StartButton.IsEnabled = true;
             StopButton.IsEnabled = false;
+        }
+
+        private void ApplyFrameMetricsToTelemetrySamples(FrameMetricsSummary frameMetricsSummary)
+        {
+            if (frameMetricsSummary.FrameCount == 0 ||
+                frameMetricsSummary.PerSecondMetrics.Count == 0 ||
+                _frameCaptureStartElapsedSeconds < 0)
+            {
+                return;
+            }
+
+            Dictionary<int, FrameSecondMetrics> frameMetricsBySecond = frameMetricsSummary
+                .PerSecondMetrics
+                .GroupBy(metric => metric.Second)
+                .ToDictionary(group => group.Key, group => group.First());
+
+            foreach (TelemetrySample sample in _samples)
+            {
+                int frameSecond = sample.ElapsedSeconds - _frameCaptureStartElapsedSeconds;
+
+                if (!frameMetricsBySecond.TryGetValue(frameSecond, out FrameSecondMetrics? frameMetrics))
+                {
+                    continue;
+                }
+
+                sample.Fps = frameMetrics.AverageFps;
+                sample.AverageFrameTimeMs = frameMetrics.AverageFrameTimeMs;
+                sample.WorstFrameTimeMs = frameMetrics.WorstFrameTimeMs;
+                sample.OnePercentLowFps = frameMetrics.OnePercentLowFps;
+                sample.PointOnePercentLowFps = frameMetrics.ZeroPointOnePercentLowFps;
+                sample.StutterCount = frameMetrics.StutterCount;
+            }
         }
 
         private string? ResolveFrameTargetProcessName()
@@ -600,6 +641,7 @@ namespace Gamepulse
             builder.AppendLine($"Worst Frame Time: {summary.WorstFrameTimeMs:0.00} ms");
             builder.AppendLine($"1% Low FPS Estimate: {summary.OnePercentLowFps:0.0}");
             builder.AppendLine($"0.1% Low FPS Estimate: {summary.ZeroPointOnePercentLowFps:0.0}");
+            builder.AppendLine($"Total Stutter Count: {summary.TotalStutterCount}");
             builder.AppendLine();
             builder.AppendLine($"Per-Second Buckets: {totalBuckets}");
             builder.AppendLine($"First Captured Bucket: Second {firstBucket}");
@@ -615,7 +657,8 @@ namespace Gamepulse
                     $"Avg FPS {second.AverageFps:0.0} | " +
                     $"Avg FT {second.AverageFrameTimeMs:0.00} ms | " +
                     $"Worst FT {second.WorstFrameTimeMs:0.00} ms | " +
-                    $"1% Low {second.OnePercentLowFps:0.0}"
+                    $"1% Low {second.OnePercentLowFps:0.0} | " +
+                    $"Stutters {second.StutterCount}"
                 );
             }
 
@@ -654,6 +697,16 @@ namespace Gamepulse
             double? averageGameCpu = AverageNullable(_samples.Select(sample => sample.GameCpuPercent));
             double? peakGameCpu = MaxNullable(_samples.Select(sample => sample.GameCpuPercent));
 
+            double? averageFps = AverageNullable(_samples.Select(sample => sample.Fps));
+            double? averageFrameTime = AverageNullable(_samples.Select(sample => sample.AverageFrameTimeMs));
+            double? worstFrameTime = MaxNullable(_samples.Select(sample => sample.WorstFrameTimeMs));
+            double? averageOnePercentLow = AverageNullable(_samples.Select(sample => sample.OnePercentLowFps));
+            double? averagePointOnePercentLow = AverageNullable(_samples.Select(sample => sample.PointOnePercentLowFps));
+
+            int totalStutters = _samples
+                .Where(sample => sample.StutterCount.HasValue)
+                .Sum(sample => sample.StutterCount!.Value);
+
             string mostCommonActiveProcess = _samples
                 .Where(sample => !string.IsNullOrWhiteSpace(sample.ActiveGameProcessName))
                 .GroupBy(sample => sample.ActiveGameProcessName)
@@ -689,6 +742,12 @@ namespace Gamepulse
                 $"Average Active Process CPU: {FormatNullablePercent(averageGameCpu)}\n" +
                 $"Peak Active Process CPU: {FormatNullablePercent(peakGameCpu)}\n" +
                 $"Peak Active Process RAM: {peakGameRamMb:0} MB\n" +
+                $"Average FPS: {FormatNullableNumber(averageFps)}\n" +
+                $"Average Frame Time: {FormatNullableNumber(averageFrameTime)} ms\n" +
+                $"Worst Frame Time: {FormatNullableNumber(worstFrameTime)} ms\n" +
+                $"Average 1% Low FPS: {FormatNullableNumber(averageOnePercentLow)}\n" +
+                $"Average 0.1% Low FPS: {FormatNullableNumber(averagePointOnePercentLow)}\n" +
+                $"Total Stutters: {totalStutters}\n" +
                 $"Most Common Top RAM Process: {mostCommonTopRamProcess}\n" +
                 $"Most Common Top CPU Process: {mostCommonTopCpuProcess}\n" +
                 $"Samples Recorded: {_samples.Count}\n" +
