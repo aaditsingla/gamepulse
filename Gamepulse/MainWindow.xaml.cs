@@ -40,7 +40,8 @@ namespace Gamepulse
         private int _frameCaptureStartElapsedSeconds = -1;
 
         private const int TopProcessRefreshSeconds = 5;
-        private const int FrameTargetDetectionDelaySeconds = 3;
+        private const int FrameTargetDetectionWindowSeconds = 10;
+        private const int FrameTargetDetectionIntervalMs = 500;
 
         private static readonly HashSet<string> IgnoredFrameTargetProcesses = new(
             StringComparer.OrdinalIgnoreCase)
@@ -129,24 +130,22 @@ namespace Gamepulse
             StartButton.IsEnabled = false;
             StopButton.IsEnabled = true;
 
-            StatusText.Text = "Status: Session running. Waiting for frame target...";
+            StatusText.Text = "Status: Session running. Looking for frame target...";
             DurationText.Text = "Session Duration: 00:00:00";
             SamplesText.Text = "Samples Recorded: 0";
 
             SummaryText.Text = "Session is recording. System telemetry will appear here after stopping.";
             FrameSummaryText.Text =
-                $"Frame target detection starts in {FrameTargetDetectionDelaySeconds} seconds.\n\n" +
+                $"Looking for a valid frame target for up to {FrameTargetDetectionWindowSeconds} seconds.\n\n" +
                 "After clicking Start Session, switch to the game or rendering app you want to capture.\n" +
-                "GamePulse will lock onto that foreground process for this session.";
+                "GamePulse will lock onto the first valid foreground process it detects.";
 
-            await Task.Delay(TimeSpan.FromSeconds(FrameTargetDetectionDelaySeconds));
+            string? targetProcessName = await DetectFrameTargetProcessAsync();
 
             if (!_sessionManager.IsRunning || _sessionManager.CurrentSession == null)
             {
                 return;
             }
-
-            string? targetProcessName = ResolveFrameTargetProcessName();
 
             if (string.IsNullOrWhiteSpace(targetProcessName))
             {
@@ -154,7 +153,8 @@ namespace Gamepulse
 
                 FrameSummaryText.Text =
                     "Frame capture did not start because no valid target process was detected.\n\n" +
-                    "Try again and switch to your game window within 3 seconds after clicking Start Session.";
+                    $"GamePulse watched the foreground window for {FrameTargetDetectionWindowSeconds} seconds.\n" +
+                    "Try again and switch to your game window after clicking Start Session.";
 
                 return;
             }
@@ -243,6 +243,52 @@ namespace Gamepulse
                 sample.PointOnePercentLowFps = frameMetrics.ZeroPointOnePercentLowFps;
                 sample.StutterCount = frameMetrics.StutterCount;
             }
+        }
+
+        private async Task<string?> DetectFrameTargetProcessAsync()
+        {
+            int checks = Math.Max(
+                1,
+                (FrameTargetDetectionWindowSeconds * 1000) / FrameTargetDetectionIntervalMs
+            );
+
+            for (int i = 0; i < checks; i++)
+            {
+                if (!_sessionManager.IsRunning)
+                {
+                    return null;
+                }
+
+                string? targetProcessName = ResolveFrameTargetProcessName();
+
+                if (!string.IsNullOrWhiteSpace(targetProcessName))
+                {
+                    return targetProcessName;
+                }
+
+                int elapsedMs = (i + 1) * FrameTargetDetectionIntervalMs;
+                int secondsRemaining = Math.Max(
+                    0,
+                    FrameTargetDetectionWindowSeconds - (elapsedMs / 1000)
+                );
+
+                FrameSummaryText.Text =
+                    "Looking for a valid frame target...\n\n" +
+                    $"Time remaining: about {secondsRemaining} seconds\n\n" +
+                    "Switch to the game or rendering app you want to capture.\n" +
+                    "GamePulse will lock onto the first valid foreground process it detects.";
+
+                try
+                {
+                    await Task.Delay(FrameTargetDetectionIntervalMs);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+
+            return null;
         }
 
         private string? ResolveFrameTargetProcessName()
