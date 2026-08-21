@@ -23,6 +23,7 @@ namespace Gamepulse
         private readonly TopCpuProcessCollector _topCpuProcessCollector;
         private readonly PresentMonCaptureService _presentMonCaptureService;
         private readonly PresentMonFrameMetricsParser _presentMonFrameMetricsParser;
+        private readonly SessionAnalysisService _sessionAnalysisService;
         private readonly SessionManager _sessionManager;
         private readonly CsvTelemetryWriter _csvTelemetryWriter;
 
@@ -108,7 +109,7 @@ namespace Gamepulse
             _presentMonFrameMetricsParser = new PresentMonFrameMetricsParser();
             _sessionManager = new SessionManager();
             _csvTelemetryWriter = new CsvTelemetryWriter();
-
+            _sessionAnalysisService = new SessionAnalysisService();
             StopButton.IsEnabled = false;
         }
 
@@ -204,6 +205,9 @@ namespace Gamepulse
             _csvTelemetryWriter.RewriteSessionFile(_samples);
 
             GenerateSessionSummary();
+
+            SessionAnalysisResult analysisResult = _sessionAnalysisService.Analyze(_samples);
+            SummaryText.Text += "\n\n" + _sessionAnalysisService.FormatAnalysis(analysisResult);
 
             FrameSummaryText.Text = FormatFrameSummaryPanel(frameMetricsSummary);
 
