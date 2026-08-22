@@ -6,8 +6,10 @@
         public int EndSecond { get; set; }
 
         public string IssueType { get; set; } = "";
-        public string Severity { get; set; } = "";
+        public string Severity { get; set; }
+
         public string LikelyCause { get; set; } = "";
+        public string ContributingFactors { get; set; } = "";
         public string Confidence { get; set; } = "";
 
         public double? Fps { get; set; }

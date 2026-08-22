@@ -27,10 +27,16 @@ namespace Gamepulse.Models
 
         public int TotalStutters { get; set; }
 
+        public int MajorIssueCount { get; set; }
+        public int MinorFrameTimeSpikeCount { get; set; }
+        public int CaptureGapCount { get; set; }
+
         public string OverallBottleneck { get; set; } = "Unknown";
         public string OverallSummary { get; set; } = "";
 
         public List<PerformanceIssue> Issues { get; set; } = new();
+        public List<PerformanceIssue> MinorIssues { get; set; } = new();
+        public List<string> TechnicalNotes { get; set; } = new();
         public List<string> Recommendations { get; set; } = new();
     }
 }

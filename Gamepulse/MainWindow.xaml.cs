@@ -107,9 +107,10 @@ namespace Gamepulse
             _topCpuProcessCollector = new TopCpuProcessCollector();
             _presentMonCaptureService = new PresentMonCaptureService();
             _presentMonFrameMetricsParser = new PresentMonFrameMetricsParser();
+            _sessionAnalysisService = new SessionAnalysisService();
             _sessionManager = new SessionManager();
             _csvTelemetryWriter = new CsvTelemetryWriter();
-            _sessionAnalysisService = new SessionAnalysisService();
+
             StopButton.IsEnabled = false;
         }
 
@@ -140,6 +141,10 @@ namespace Gamepulse
                 $"Looking for a valid frame target for up to {FrameTargetDetectionWindowSeconds} seconds.\n\n" +
                 "After clicking Start Session, switch to the game or rendering app you want to capture.\n" +
                 "GamePulse will lock onto the first valid foreground process it detects.";
+
+            PerformanceAnalysisText.Text =
+                "Performance analysis will appear here after the session stops.\n\n" +
+                "GamePulse will analyze FPS drops, frame-time spikes, stutters, severe hitches, CPU/GPU/RAM/disk pressure, and background-process impact.";
 
             string? targetProcessName = await DetectFrameTargetProcessAsync();
 
@@ -188,6 +193,8 @@ namespace Gamepulse
                 ? "No frame capture target was locked for this session."
                 : $"Finalizing PresentMon frame capture for {_lockedFrameTargetProcessName}. The app should stay responsive.";
 
+            PerformanceAnalysisText.Text = "Analyzing session after frame data is finalized...";
+
             _sessionManager.StopSession();
 
             await StopTelemetrySamplingAsync();
@@ -207,7 +214,7 @@ namespace Gamepulse
             GenerateSessionSummary();
 
             SessionAnalysisResult analysisResult = _sessionAnalysisService.Analyze(_samples);
-            SummaryText.Text += "\n\n" + _sessionAnalysisService.FormatAnalysis(analysisResult);
+            PerformanceAnalysisText.Text = _sessionAnalysisService.FormatAnalysis(analysisResult);
 
             FrameSummaryText.Text = FormatFrameSummaryPanel(frameMetricsSummary);
 
@@ -696,10 +703,11 @@ namespace Gamepulse
             builder.AppendLine($"Per-Second Buckets: {totalBuckets}");
             builder.AppendLine($"First Captured Bucket: Second {firstBucket}");
             builder.AppendLine($"Last Captured Bucket: Second {lastBucket}");
-            builder.AppendLine();
-            builder.AppendLine("All Per-Second Buckets:");
 
-            foreach (FrameSecondMetrics second in summary.PerSecondMetrics)
+            builder.AppendLine();
+            builder.AppendLine("Recent Per-Second Buckets:");
+
+            foreach (FrameSecondMetrics second in summary.PerSecondMetrics.TakeLast(12))
             {
                 builder.AppendLine(
                     $"Second {second.Second}: " +
@@ -797,7 +805,7 @@ namespace Gamepulse
                 $"Worst Frame Time: {FormatNullableNumber(worstFrameTime)} ms\n" +
                 $"Average 1% Low FPS: {FormatNullableNumber(averageOnePercentLow)}\n" +
                 $"Average 0.1% Low FPS: {FormatNullableNumber(averagePointOnePercentLow)}\n" +
-                $"Total Stutters: {totalStutters}\n" +
+                $"Total Stutter Frames: {totalStutters}\n" +
                 $"Most Common Top RAM Process: {mostCommonTopRamProcess}\n" +
                 $"Most Common Top CPU Process: {mostCommonTopCpuProcess}\n" +
                 $"Samples Recorded: {_samples.Count}\n" +

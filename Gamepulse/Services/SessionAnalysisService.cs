@@ -9,18 +9,41 @@ namespace Gamepulse.Services
     public class SessionAnalysisService
     {
         private const double FpsDropThresholdMultiplier = 0.70;
-        private const double WarningStutterFrameTimeMs = 50.0;
-        private const double SevereStutterFrameTimeMs = 100.0;
+
+        private const double FrameTimeSpikeAbsoluteMs = 50.0;
+        private const double SevereHitchFrameTimeMs = 100.0;
+        private const double FrameTimeSpikeBaselineMultiplier = 4.0;
+        private const double StutterAverageFrameTimeMultiplier = 1.5;
+        private const double SevereHitchAverageFrameTimeMultiplier = 1.8;
+
+        private const double CaptureGapFpsThreshold = 5.0;
+        private const double CaptureGapAverageFrameTimeMs = 500.0;
+        private const double CaptureGapWorstFrameTimeMs = 500.0;
 
         private const double HighGpuUsagePercent = 90.0;
+        private const double VeryHighGpuUsagePercent = 97.0;
+
         private const double HighCpuUsagePercent = 85.0;
+        private const double VeryHighCpuUsagePercent = 95.0;
+
         private const double HighGameCpuUsagePercent = 70.0;
+        private const double VeryHighGameCpuUsagePercent = 85.0;
+
         private const double HighRamUsagePercent = 90.0;
+        private const double VeryHighRamUsagePercent = 95.0;
+
         private const double HighDiskActivePercent = 80.0;
+        private const double MediumDiskActivePercent = 60.0;
+
         private const double HighDiskReadWriteMBps = 100.0;
+        private const double MediumDiskReadWriteMBps = 50.0;
 
         private const int EventWindowSeconds = 3;
-        private const int MaxIssuesToReport = 12;
+        private const int IgnoreStartSeconds = 3;
+        private const int IgnoreEndSeconds = 2;
+
+        private const int MaxMajorIssuesToReport = 6;
+        private const int MaxMinorIssuesToReport = 6;
 
         public SessionAnalysisResult Analyze(List<TelemetrySample> samples)
         {
@@ -45,8 +68,8 @@ namespace Gamepulse.Services
             {
                 result.OverallSummary =
                     "System telemetry was captured, but no valid frame data was available. " +
-                    "GamePulse can still summarize CPU, RAM, disk, GPU, and process activity, " +
-                    "but FPS drop analysis requires PresentMon frame data.";
+                    "GamePulse can summarize CPU, RAM, disk, GPU, and process activity, " +
+                    "but FPS drop and frame-time analysis requires PresentMon frame data.";
 
                 result.OverallBottleneck = DetectOverallSystemPressure(result);
                 result.Recommendations = BuildOverallRecommendations(result);
@@ -54,19 +77,48 @@ namespace Gamepulse.Services
                 return result;
             }
 
-            List<PerformanceIssue> detectedIssues = new();
+            List<TelemetrySample> analysisFrameSamples = RemoveStartAndEndNoise(frameSamples);
 
-            detectedIssues.AddRange(DetectFpsDrops(samples, frameSamples, result));
-            detectedIssues.AddRange(DetectStutters(samples, frameSamples));
+            result.CaptureGapCount = CountCaptureGaps(analysisFrameSamples);
 
-            result.Issues = MergeAndRankIssues(detectedIssues)
-                .Take(MaxIssuesToReport)
+            if (result.CaptureGapCount > 0)
+            {
+                result.TechnicalNotes.Add(
+                    $"{result.CaptureGapCount} capture gap/no-render sample(s) were detected and excluded from normal bottleneck classification. " +
+                    "These usually happen during alt-tab, loading screens, app focus changes, or when the game stops presenting frames."
+                );
+            }
+
+            List<TelemetrySample> usableFrameSamples = analysisFrameSamples
+                .Where(sample => !IsCaptureGap(sample))
                 .ToList();
+
+            List<PerformanceIssue> detectedMajorIssues = new();
+            List<PerformanceIssue> detectedMinorIssues = new();
+
+            detectedMajorIssues.AddRange(DetectFpsDrops(samples, usableFrameSamples, result));
+
+            List<PerformanceIssue> frameTimeIssues = DetectFrameTimeProblems(samples, usableFrameSamples, result);
+
+            detectedMajorIssues.AddRange(frameTimeIssues.Where(issue => issue.Severity != "Info"));
+            detectedMinorIssues.AddRange(frameTimeIssues.Where(issue => issue.Severity == "Info"));
+
+            result.Issues = MergeAndRankIssues(detectedMajorIssues)
+                .Take(MaxMajorIssuesToReport)
+                .ToList();
+
+            result.MinorIssues = MergeAndRankIssues(detectedMinorIssues)
+                .Take(MaxMinorIssuesToReport)
+                .ToList();
+
+            result.MajorIssueCount = result.Issues.Count;
+            result.MinorFrameTimeSpikeCount = detectedMinorIssues.Count;
 
             result.OverallBottleneck = DetectOverallBottleneck(result.Issues, result);
             result.Recommendations = BuildOverallRecommendations(result);
-
             result.OverallSummary = BuildOverallSummary(result);
+
+            AddSessionCautionNotes(result);
 
             return result;
         }
@@ -98,6 +150,10 @@ namespace Gamepulse.Services
             builder.AppendLine($"Average FPS: {result.AverageFps:0.0}");
             builder.AppendLine($"Median FPS: {result.MedianFps:0.0}");
             builder.AppendLine($"Lowest FPS: {result.LowestFps:0.0}");
+
+            double baselineFrameTimeMs = GetBaselineFrameTimeMs(result);
+            builder.AppendLine($"Baseline Frame Time: {baselineFrameTimeMs:0.00} ms");
+
             builder.AppendLine($"Average CPU: {result.AverageCpuPercent:0.0}%");
             builder.AppendLine($"Peak CPU: {result.PeakCpuPercent:0.0}%");
             builder.AppendLine($"Average RAM: {result.AverageRamPercent:0.0}%");
@@ -108,36 +164,132 @@ namespace Gamepulse.Services
             builder.AppendLine($"Peak GPU 1: {result.PeakGpu1UsagePercent:0.0}%");
             builder.AppendLine($"Average Disk Active: {result.AverageDiskActivePercent:0.0}%");
             builder.AppendLine($"Peak Disk Active: {result.PeakDiskActivePercent:0.0}%");
-            builder.AppendLine($"Total Stutters: {result.TotalStutters}");
+            builder.AppendLine($"Total Stutter Frames: {result.TotalStutters}");
             builder.AppendLine();
 
             if (result.Issues.Count == 0)
             {
-                builder.AppendLine("Detected Issues:");
-                builder.AppendLine("No major FPS drops or stutters were detected from the current rules.");
+                builder.AppendLine("Major Issues:");
+                builder.AppendLine("No major FPS drops, stutters, or gameplay-impacting severe hitches were detected by the current rules.");
                 builder.AppendLine();
             }
             else
             {
-                builder.AppendLine("Detected Issues:");
+                builder.AppendLine("Major Issues:");
 
                 foreach (PerformanceIssue issue in result.Issues)
                 {
-                    builder.AppendLine(
-                        $"- Second {issue.StartSecond}: {issue.IssueType} [{issue.Severity}]"
-                    );
-
-                    builder.AppendLine($"  Likely Cause: {issue.LikelyCause}");
-                    builder.AppendLine($"  Confidence: {issue.Confidence}");
-                    builder.AppendLine($"  Evidence: {issue.Evidence}");
-                    builder.AppendLine($"  Recommendation: {issue.Recommendation}");
-                    builder.AppendLine();
+                    AppendMajorIssue(builder, issue);
                 }
+            }
+
+            if (result.MinorIssues.Count > 0)
+            {
+                builder.AppendLine("Minor / Diagnostic Frame-Time Events:");
+                builder.AppendLine(
+                    "These are short frame-time spikes where the full-second average stayed mostly normal. " +
+                    "They are logged for diagnostics, but they may not be noticeable during gameplay."
+                );
+
+                foreach (PerformanceIssue issue in result.MinorIssues)
+                {
+                    AppendMinorIssue(builder, issue);
+                }
+            }
+
+            if (result.TechnicalNotes.Count > 0)
+            {
+                builder.AppendLine("Technical Notes:");
+
+                foreach (string note in result.TechnicalNotes)
+                {
+                    builder.AppendLine($"- {note}");
+                }
+
+                builder.AppendLine();
             }
 
             AppendRecommendations(builder, result.Recommendations);
 
             return builder.ToString();
+        }
+
+        private static void AppendMajorIssue(StringBuilder builder, PerformanceIssue issue)
+        {
+            string secondRange = issue.StartSecond == issue.EndSecond
+                ? $"Second {issue.StartSecond}"
+                : $"Seconds {issue.StartSecond}-{issue.EndSecond}";
+
+            builder.AppendLine($"- {secondRange}: {issue.IssueType} [{issue.Severity}]");
+            builder.AppendLine($"  Primary Cause: {issue.LikelyCause}");
+
+            if (!string.IsNullOrWhiteSpace(issue.ContributingFactors))
+            {
+                builder.AppendLine($"  Contributing Factors: {issue.ContributingFactors}");
+            }
+
+            builder.AppendLine($"  Confidence: {issue.Confidence}");
+            builder.AppendLine($"  Evidence: {issue.Evidence}");
+            builder.AppendLine($"  Recommendation: {issue.Recommendation}");
+            builder.AppendLine();
+        }
+
+        private static void AppendMinorIssue(StringBuilder builder, PerformanceIssue issue)
+        {
+            string secondRange = issue.StartSecond == issue.EndSecond
+                ? $"Second {issue.StartSecond}"
+                : $"Seconds {issue.StartSecond}-{issue.EndSecond}";
+
+            builder.AppendLine($"- {secondRange}: {issue.IssueType} [{issue.Severity}]");
+            builder.AppendLine("  Impact: Diagnostic frame-time event. No major bottleneck confirmed from this event alone.");
+
+            if (!string.IsNullOrWhiteSpace(issue.ContributingFactors))
+            {
+                builder.AppendLine($"  Possible Contributors: {issue.ContributingFactors}");
+            }
+            else
+            {
+                builder.AppendLine("  Possible Contributors: Not strong enough to classify.");
+            }
+
+            builder.AppendLine($"  Confidence: {issue.Confidence}");
+            builder.AppendLine($"  Evidence: {issue.Evidence}");
+            builder.AppendLine($"  Note: {issue.Recommendation}");
+            builder.AppendLine();
+        }
+
+        private static List<TelemetrySample> RemoveStartAndEndNoise(List<TelemetrySample> frameSamples)
+        {
+            if (frameSamples.Count == 0)
+            {
+                return frameSamples;
+            }
+
+            int firstSecond = frameSamples.First().ElapsedSeconds;
+            int lastSecond = frameSamples.Last().ElapsedSeconds;
+
+            return frameSamples
+                .Where(sample =>
+                    sample.ElapsedSeconds >= firstSecond + IgnoreStartSeconds &&
+                    sample.ElapsedSeconds <= lastSecond - IgnoreEndSeconds)
+                .ToList();
+        }
+
+        private static int CountCaptureGaps(List<TelemetrySample> frameSamples)
+        {
+            return frameSamples.Count(IsCaptureGap);
+        }
+
+        private static bool IsCaptureGap(TelemetrySample sample)
+        {
+            double fps = sample.Fps ?? 0;
+            double averageFrameTimeMs = sample.AverageFrameTimeMs ?? 0;
+            double worstFrameTimeMs = sample.WorstFrameTimeMs ?? 0;
+
+            return
+                (fps > 0 && fps < CaptureGapFpsThreshold) ||
+                averageFrameTimeMs >= CaptureGapAverageFrameTimeMs ||
+                worstFrameTimeMs >= CaptureGapWorstFrameTimeMs;
         }
 
         private static void FillSessionBaselines(
@@ -170,10 +322,16 @@ namespace Gamepulse.Services
             }
 
             List<double> fpsValues = frameSamples
+                .Where(sample => !IsCaptureGap(sample))
                 .Select(sample => sample.Fps!.Value)
                 .Where(value => value > 0)
                 .OrderBy(value => value)
                 .ToList();
+
+            if (fpsValues.Count == 0)
+            {
+                return;
+            }
 
             result.AverageFps = fpsValues.Average();
             result.MedianFps = Median(fpsValues);
@@ -187,9 +345,7 @@ namespace Gamepulse.Services
         {
             List<PerformanceIssue> issues = new();
 
-            double baselineFps = result.MedianFps > 0
-                ? result.MedianFps
-                : result.AverageFps;
+            double baselineFps = GetBaselineFps(result);
 
             if (baselineFps <= 0)
             {
@@ -199,7 +355,10 @@ namespace Gamepulse.Services
             double dropThreshold = baselineFps * FpsDropThresholdMultiplier;
 
             List<TelemetrySample> dropSamples = frameSamples
-                .Where(sample => sample.Fps.HasValue && sample.Fps.Value < dropThreshold)
+                .Where(sample =>
+                    sample.Fps.HasValue &&
+                    sample.Fps.Value >= CaptureGapFpsThreshold &&
+                    sample.Fps.Value < dropThreshold)
                 .OrderBy(sample => sample.ElapsedSeconds)
                 .ToList();
 
@@ -215,28 +374,36 @@ namespace Gamepulse.Services
                     issueType: "FPS Drop",
                     eventSample: sample,
                     window: window,
-                    baselineFps: baselineFps
+                    result: result
                 ));
             }
 
             return issues;
         }
 
-        private static List<PerformanceIssue> DetectStutters(
+        private static List<PerformanceIssue> DetectFrameTimeProblems(
             List<TelemetrySample> allSamples,
-            List<TelemetrySample> frameSamples)
+            List<TelemetrySample> frameSamples,
+            SessionAnalysisResult result)
         {
             List<PerformanceIssue> issues = new();
 
-            List<TelemetrySample> stutterSamples = frameSamples
-                .Where(sample =>
-                    sample.WorstFrameTimeMs.HasValue &&
-                    sample.WorstFrameTimeMs.Value >= WarningStutterFrameTimeMs)
-                .OrderByDescending(sample => sample.WorstFrameTimeMs!.Value)
-                .ToList();
+            double baselineFrameTimeMs = GetBaselineFrameTimeMs(result);
 
-            foreach (TelemetrySample sample in stutterSamples)
+            if (baselineFrameTimeMs <= 0)
             {
+                return issues;
+            }
+
+            foreach (TelemetrySample sample in frameSamples)
+            {
+                string issueType = ClassifyFrameTimeIssue(sample, result);
+
+                if (string.IsNullOrWhiteSpace(issueType))
+                {
+                    continue;
+                }
+
                 List<TelemetrySample> window = GetWindowSamples(
                     allSamples,
                     sample.ElapsedSeconds,
@@ -244,46 +411,130 @@ namespace Gamepulse.Services
                 );
 
                 issues.Add(BuildIssueFromWindow(
-                    issueType: sample.WorstFrameTimeMs >= SevereStutterFrameTimeMs
-                        ? "Severe Stutter"
-                        : "Stutter",
+                    issueType: issueType,
                     eventSample: sample,
                     window: window,
-                    baselineFps: null
+                    result: result
                 ));
             }
 
             return issues;
         }
 
+        private static string ClassifyFrameTimeIssue(
+            TelemetrySample sample,
+            SessionAnalysisResult result)
+        {
+            if (IsCaptureGap(sample))
+            {
+                return "";
+            }
+
+            if (!sample.WorstFrameTimeMs.HasValue)
+            {
+                return "";
+            }
+
+            double baselineFrameTimeMs = GetBaselineFrameTimeMs(result);
+
+            if (baselineFrameTimeMs <= 0)
+            {
+                return "";
+            }
+
+            double worstFrameTimeMs = sample.WorstFrameTimeMs.Value;
+            double averageFrameTimeMs = sample.AverageFrameTimeMs ?? 0;
+            double fps = sample.Fps ?? 0;
+
+            double spikeThreshold = Math.Max(
+                FrameTimeSpikeAbsoluteMs,
+                baselineFrameTimeMs * FrameTimeSpikeBaselineMultiplier
+            );
+
+            bool verySlowSingleFrame = worstFrameTimeMs >= SevereHitchFrameTimeMs;
+
+            bool frameTimeSpike =
+                worstFrameTimeMs >= spikeThreshold;
+
+            bool averageFramePacingWorse =
+                averageFrameTimeMs >= baselineFrameTimeMs * StutterAverageFrameTimeMultiplier;
+
+            bool severeAverageFramePacingWorse =
+                averageFrameTimeMs >= baselineFrameTimeMs * SevereHitchAverageFrameTimeMultiplier;
+
+            bool fpsAlsoDropped =
+                fps >= CaptureGapFpsThreshold &&
+                fps < GetBaselineFps(result) * FpsDropThresholdMultiplier;
+
+            if (verySlowSingleFrame && (severeAverageFramePacingWorse || fpsAlsoDropped))
+            {
+                return "Severe Hitch";
+            }
+
+            if (verySlowSingleFrame)
+            {
+                return "Severe Frame-Time Spike";
+            }
+
+            if (frameTimeSpike && averageFramePacingWorse)
+            {
+                return "Stutter";
+            }
+
+            if (frameTimeSpike && fpsAlsoDropped)
+            {
+                return "Stutter";
+            }
+
+            if (frameTimeSpike)
+            {
+                return "Frame-Time Spike";
+            }
+
+            return "";
+        }
+
         private static PerformanceIssue BuildIssueFromWindow(
             string issueType,
             TelemetrySample eventSample,
             List<TelemetrySample> window,
-            double? baselineFps)
+            SessionAnalysisResult result)
         {
-            CauseScore gpuCause = ScoreGpuCause(window);
-            CauseScore cpuCause = ScoreCpuCause(window);
-            CauseScore ramCause = ScoreRamCause(window);
-            CauseScore diskCause = ScoreDiskCause(window);
-            CauseScore backgroundCause = ScoreBackgroundCause(window, eventSample);
+            List<TelemetrySample> usableWindow = window
+                .Where(sample => !IsCaptureGap(sample))
+                .ToList();
+
+            if (usableWindow.Count == 0)
+            {
+                usableWindow = window;
+            }
 
             List<CauseScore> causeScores = new()
             {
-                gpuCause,
-                cpuCause,
-                ramCause,
-                diskCause,
-                backgroundCause
+                ScoreGpuCause(usableWindow),
+                ScoreCpuCause(usableWindow),
+                ScoreRamCause(usableWindow),
+                ScoreDiskCause(usableWindow),
+                ScoreBackgroundCause(usableWindow, eventSample)
             };
 
-            CauseScore bestCause = causeScores
-                .OrderByDescending(score => score.Score)
-                .First();
+            bool isMinorInfoIssue =
+                issueType == "Frame-Time Spike" ||
+                issueType == "Severe Frame-Time Spike";
 
-            string severity = DetermineSeverity(issueType, eventSample, baselineFps);
-            string evidence = BuildEvidence(eventSample, window, bestCause);
-            string recommendation = BuildRecommendation(bestCause.Cause);
+            CauseScore primaryCause = isMinorInfoIssue
+                ? new CauseScore("Not classified for diagnostic spike", 0, "Low", 999)
+                : PickPrimaryCause(causeScores);
+
+            List<CauseScore> contributingCauses = PickContributingCauses(
+                causeScores,
+                primaryCause,
+                isMinorInfoIssue
+            );
+
+            string severity = DetermineSeverity(issueType, eventSample, result);
+            string evidence = BuildEvidence(eventSample, usableWindow, primaryCause, contributingCauses, result);
+            string recommendation = BuildRecommendation(primaryCause.Cause, contributingCauses, isMinorInfoIssue);
 
             return new PerformanceIssue
             {
@@ -291,8 +542,13 @@ namespace Gamepulse.Services
                 EndSecond = eventSample.ElapsedSeconds,
                 IssueType = issueType,
                 Severity = severity,
-                LikelyCause = bestCause.Cause,
-                Confidence = bestCause.Confidence,
+
+                LikelyCause = primaryCause.Cause,
+                ContributingFactors = string.Join(
+                    ", ",
+                    contributingCauses.Select(cause => cause.Cause)
+                ),
+                Confidence = isMinorInfoIssue ? "Low" : primaryCause.Confidence,
 
                 Fps = eventSample.Fps,
                 AverageFrameTimeMs = eventSample.AverageFrameTimeMs,
@@ -315,6 +571,47 @@ namespace Gamepulse.Services
             };
         }
 
+        private static CauseScore PickPrimaryCause(List<CauseScore> causeScores)
+        {
+            CauseScore bestCause = causeScores
+                .OrderByDescending(score => score.Score)
+                .ThenBy(score => score.Priority)
+                .First();
+
+            if (bestCause.Score < 4)
+            {
+                return new CauseScore(
+                    "Mixed or unclear",
+                    bestCause.Score,
+                    "Low",
+                    999
+                );
+            }
+
+            return bestCause;
+        }
+
+        private static List<CauseScore> PickContributingCauses(
+            List<CauseScore> causeScores,
+            CauseScore primaryCause,
+            bool isMinorInfoIssue)
+        {
+            if (!isMinorInfoIssue && primaryCause.Cause == "Mixed or unclear")
+            {
+                return new List<CauseScore>();
+            }
+
+            int threshold = isMinorInfoIssue ? 5 : 4;
+
+            return causeScores
+                .Where(score =>
+                    score.Cause != primaryCause.Cause &&
+                    score.Score >= threshold)
+                .OrderByDescending(score => score.Score)
+                .Take(2)
+                .ToList();
+        }
+
         private static List<PerformanceIssue> MergeAndRankIssues(List<PerformanceIssue> issues)
         {
             List<PerformanceIssue> mergedIssues = new();
@@ -327,7 +624,7 @@ namespace Gamepulse.Services
                     .LastOrDefault(existingIssue =>
                         existingIssue.IssueType == issue.IssueType &&
                         existingIssue.LikelyCause == issue.LikelyCause &&
-                        Math.Abs(existingIssue.EndSecond - issue.StartSecond) <= 2);
+                        Math.Abs(existingIssue.EndSecond - issue.StartSecond) <= 3);
 
                 if (recentSimilarIssue == null)
                 {
@@ -353,6 +650,8 @@ namespace Gamepulse.Services
                     recentSimilarIssue.Gpu1UsagePercent = issue.Gpu1UsagePercent;
                     recentSimilarIssue.TopCpuProcesses = issue.TopCpuProcesses;
                     recentSimilarIssue.TopRamProcesses = issue.TopRamProcesses;
+                    recentSimilarIssue.ContributingFactors = issue.ContributingFactors;
+                    recentSimilarIssue.Confidence = issue.Confidence;
                     recentSimilarIssue.Evidence = issue.Evidence;
                     recentSimilarIssue.Recommendation = issue.Recommendation;
                 }
@@ -400,6 +699,15 @@ namespace Gamepulse.Services
             {
                 rank += 50;
             }
+            else if (issue.Severity == "Info")
+            {
+                rank += 20;
+            }
+
+            if (issue.IssueType.Contains("Severe Hitch", StringComparison.OrdinalIgnoreCase))
+            {
+                rank += 30;
+            }
 
             if (issue.IssueType.Contains("Stutter", StringComparison.OrdinalIgnoreCase))
             {
@@ -407,6 +715,11 @@ namespace Gamepulse.Services
             }
 
             if (issue.IssueType.Contains("FPS", StringComparison.OrdinalIgnoreCase))
+            {
+                rank += 15;
+            }
+
+            if (issue.IssueType.Contains("Frame-Time", StringComparison.OrdinalIgnoreCase))
             {
                 rank += 10;
             }
@@ -426,28 +739,40 @@ namespace Gamepulse.Services
         private static string DetermineSeverity(
             string issueType,
             TelemetrySample eventSample,
-            double? baselineFps)
+            SessionAnalysisResult result)
         {
-            if (eventSample.WorstFrameTimeMs.HasValue &&
-                eventSample.WorstFrameTimeMs.Value >= SevereStutterFrameTimeMs)
+            if (issueType == "Severe Hitch")
             {
                 return "Severe";
             }
 
-            if (issueType.Contains("Stutter", StringComparison.OrdinalIgnoreCase))
+            if (issueType == "Stutter")
             {
                 return "Warning";
             }
 
-            if (baselineFps.HasValue &&
-                baselineFps.Value > 0 &&
-                eventSample.Fps.HasValue)
+            if (issueType == "Severe Frame-Time Spike")
             {
-                double ratio = eventSample.Fps.Value / baselineFps.Value;
+                return "Info";
+            }
 
-                if (ratio <= 0.40)
+            if (issueType == "Frame-Time Spike")
+            {
+                return "Info";
+            }
+
+            if (issueType == "FPS Drop")
+            {
+                double baselineFps = GetBaselineFps(result);
+
+                if (baselineFps > 0 && eventSample.Fps.HasValue)
                 {
-                    return "Severe";
+                    double ratio = eventSample.Fps.Value / baselineFps;
+
+                    if (ratio <= 0.40)
+                    {
+                        return "Severe";
+                    }
                 }
 
                 return "Warning";
@@ -478,49 +803,68 @@ namespace Gamepulse.Services
             double peakGpu0 = MaxNullable(window.Select(sample => sample.Gpu0UsagePercent));
             double peakGpu = Math.Max(peakGpu0, peakGpu1);
 
+            double peakCpu = Max(window.Select(sample => sample.CpuPercent));
+            double peakDiskActive = MaxNullable(window.Select(sample => sample.DiskActivePercent));
+
             int score = 0;
 
-            if (peakGpu >= 98)
+            if (peakGpu >= VeryHighGpuUsagePercent)
             {
-                score += 5;
+                score += 6;
             }
             else if (peakGpu >= HighGpuUsagePercent)
             {
-                score += 4;
+                score += 5;
             }
             else if (peakGpu >= 80)
             {
                 score += 2;
             }
 
-            return new CauseScore(
-                "GPU-bound",
-                score,
-                score >= 4 ? "High" : score >= 2 ? "Medium" : "Low"
-            );
+            if (peakCpu < 80 && peakGpu >= HighGpuUsagePercent)
+            {
+                score += 1;
+            }
+
+            if (peakDiskActive < MediumDiskActivePercent && peakGpu >= HighGpuUsagePercent)
+            {
+                score += 1;
+            }
+
+            string confidence = score >= 6 ? "High" : score >= 4 ? "Medium" : "Low";
+
+            return new CauseScore("GPU-bound", score, confidence, 1);
         }
 
         private static CauseScore ScoreCpuCause(List<TelemetrySample> window)
         {
             double peakCpu = Max(window.Select(sample => sample.CpuPercent));
             double peakGameCpu = MaxNullable(window.Select(sample => sample.GameCpuPercent));
+            double peakGpu = Math.Max(
+                MaxNullable(window.Select(sample => sample.Gpu0UsagePercent)),
+                MaxNullable(window.Select(sample => sample.Gpu1UsagePercent))
+            );
 
             int score = 0;
 
-            if (peakCpu >= 95)
+            if (peakCpu >= VeryHighCpuUsagePercent)
             {
-                score += 5;
+                score += 6;
             }
             else if (peakCpu >= HighCpuUsagePercent)
             {
-                score += 4;
+                score += 5;
             }
             else if (peakCpu >= 75)
             {
                 score += 2;
             }
 
-            if (peakGameCpu >= HighGameCpuUsagePercent)
+            if (peakGameCpu >= VeryHighGameCpuUsagePercent)
+            {
+                score += 4;
+            }
+            else if (peakGameCpu >= HighGameCpuUsagePercent)
             {
                 score += 3;
             }
@@ -529,37 +873,48 @@ namespace Gamepulse.Services
                 score += 1;
             }
 
-            return new CauseScore(
-                "CPU-bound",
-                score,
-                score >= 5 ? "High" : score >= 3 ? "Medium" : "Low"
-            );
+            if (peakGpu < 85 && peakCpu >= HighCpuUsagePercent)
+            {
+                score += 1;
+            }
+
+            string confidence = score >= 7 ? "High" : score >= 4 ? "Medium" : "Low";
+
+            return new CauseScore("CPU-bound", score, confidence, 2);
         }
 
         private static CauseScore ScoreRamCause(List<TelemetrySample> window)
         {
             double peakRam = Max(window.Select(sample => sample.RamPercent));
+            double peakGameRamMb = MaxNullable(window.Select(sample => sample.GameRamMb));
 
             int score = 0;
 
-            if (peakRam >= 95)
+            if (peakRam >= VeryHighRamUsagePercent)
             {
-                score += 5;
+                score += 6;
             }
             else if (peakRam >= HighRamUsagePercent)
             {
-                score += 4;
+                score += 5;
             }
-            else if (peakRam >= 85)
+            else if (peakRam >= 88)
+            {
+                score += 3;
+            }
+
+            if (peakGameRamMb >= 8000)
             {
                 score += 2;
             }
+            else if (peakGameRamMb >= 5000)
+            {
+                score += 1;
+            }
 
-            return new CauseScore(
-                "Memory pressure",
-                score,
-                score >= 4 ? "High" : score >= 2 ? "Medium" : "Low"
-            );
+            string confidence = score >= 6 ? "High" : score >= 4 ? "Medium" : "Low";
+
+            return new CauseScore("Memory pressure", score, confidence, 3);
         }
 
         private static CauseScore ScoreDiskCause(List<TelemetrySample> window)
@@ -570,29 +925,31 @@ namespace Gamepulse.Services
 
             int score = 0;
 
-            if (peakDiskActive >= HighDiskActivePercent)
+            bool highDiskActivity = peakDiskActive >= HighDiskActivePercent;
+            bool mediumDiskActivity = peakDiskActive >= MediumDiskActivePercent;
+            bool highReadWrite = peakRead >= HighDiskReadWriteMBps || peakWrite >= HighDiskReadWriteMBps;
+            bool mediumReadWrite = peakRead >= MediumDiskReadWriteMBps || peakWrite >= MediumDiskReadWriteMBps;
+
+            if (highDiskActivity && highReadWrite)
+            {
+                score += 7;
+            }
+            else if (highDiskActivity && mediumReadWrite)
+            {
+                score += 5;
+            }
+            else if (mediumDiskActivity && mediumReadWrite)
             {
                 score += 4;
             }
-            else if (peakDiskActive >= 60)
+            else if (highDiskActivity)
             {
                 score += 2;
             }
 
-            if (peakRead >= HighDiskReadWriteMBps || peakWrite >= HighDiskReadWriteMBps)
-            {
-                score += 3;
-            }
-            else if (peakRead >= 50 || peakWrite >= 50)
-            {
-                score += 1;
-            }
+            string confidence = score >= 6 ? "High" : score >= 4 ? "Medium" : "Low";
 
-            return new CauseScore(
-                "Disk or asset-loading spike",
-                score,
-                score >= 5 ? "High" : score >= 3 ? "Medium" : "Low"
-            );
+            return new CauseScore("Disk or asset-loading spike", score, confidence, 4);
         }
 
         private static CauseScore ScoreBackgroundCause(
@@ -607,7 +964,7 @@ namespace Gamepulse.Services
             {
                 if (ContainsNonGameTopProcess(sample.TopCpuProcesses, activeProcess))
                 {
-                    score += 2;
+                    score += 3;
                     break;
                 }
             }
@@ -616,16 +973,14 @@ namespace Gamepulse.Services
             {
                 if (ContainsNonGameTopProcess(sample.TopRamProcesses, activeProcess))
                 {
-                    score += 1;
+                    score += 2;
                     break;
                 }
             }
 
-            return new CauseScore(
-                "Background process impact",
-                score,
-                score >= 3 ? "Medium" : score >= 1 ? "Low" : "Low"
-            );
+            string confidence = score >= 5 ? "Medium" : score >= 3 ? "Low" : "Low";
+
+            return new CauseScore("Background process impact", score, confidence, 5);
         }
 
         private static bool ContainsNonGameTopProcess(string processList, string activeProcess)
@@ -649,6 +1004,11 @@ namespace Gamepulse.Services
                 return false;
             }
 
+            if (IsIgnoredBackgroundProcess(firstProcessName))
+            {
+                return false;
+            }
+
             if (string.IsNullOrWhiteSpace(activeProcess))
             {
                 return true;
@@ -657,11 +1017,39 @@ namespace Gamepulse.Services
             string normalizedActive = RemoveExe(activeProcess);
             string normalizedTop = RemoveExe(firstProcessName);
 
+            if (normalizedActive.Contains(normalizedTop, StringComparison.OrdinalIgnoreCase) ||
+                normalizedTop.Contains(normalizedActive, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
             return !string.Equals(
                 normalizedActive,
                 normalizedTop,
                 StringComparison.OrdinalIgnoreCase
             );
+        }
+
+        private static bool IsIgnoredBackgroundProcess(string processName)
+        {
+            string normalized = RemoveExe(processName);
+
+            string[] ignored =
+            {
+                "Idle",
+                "System",
+                "Registry",
+                "Memory Compression",
+                "Gamepulse",
+                "GameBar",
+                "GameBarFTServer",
+                "ApplicationFrameHost",
+                "dwm",
+                "explorer"
+            };
+
+            return ignored.Any(value =>
+                string.Equals(value, normalized, StringComparison.OrdinalIgnoreCase));
         }
 
         private static string RemoveExe(string processName)
@@ -677,8 +1065,13 @@ namespace Gamepulse.Services
         private static string BuildEvidence(
             TelemetrySample eventSample,
             List<TelemetrySample> window,
-            CauseScore bestCause)
+            CauseScore primaryCause,
+            List<CauseScore> contributingCauses,
+            SessionAnalysisResult result)
         {
+            double baselineFps = GetBaselineFps(result);
+            double baselineFrameTimeMs = GetBaselineFrameTimeMs(result);
+
             double peakGpu1 = MaxNullable(window.Select(sample => sample.Gpu1UsagePercent));
             double peakGpu0 = MaxNullable(window.Select(sample => sample.Gpu0UsagePercent));
             double peakCpu = Max(window.Select(sample => sample.CpuPercent));
@@ -690,19 +1083,34 @@ namespace Gamepulse.Services
 
             List<string> evidence = new();
 
+            evidence.Add($"baseline FPS {baselineFps:0.0}");
+            evidence.Add($"baseline frame time {baselineFrameTimeMs:0.00} ms");
+
             if (eventSample.Fps.HasValue)
             {
-                evidence.Add($"FPS {eventSample.Fps.Value:0.0}");
+                evidence.Add($"event FPS {eventSample.Fps.Value:0.0}");
             }
 
             if (eventSample.AverageFrameTimeMs.HasValue)
             {
-                evidence.Add($"avg frame time {eventSample.AverageFrameTimeMs.Value:0.00} ms");
+                evidence.Add($"event avg frame time {eventSample.AverageFrameTimeMs.Value:0.00} ms");
+
+                if (baselineFrameTimeMs > 0)
+                {
+                    double averageFrameTimeRatio = eventSample.AverageFrameTimeMs.Value / baselineFrameTimeMs;
+                    evidence.Add($"avg frame time ratio {averageFrameTimeRatio:0.0}x");
+                }
             }
 
             if (eventSample.WorstFrameTimeMs.HasValue)
             {
-                evidence.Add($"worst frame time {eventSample.WorstFrameTimeMs.Value:0.00} ms");
+                evidence.Add($"event worst frame time {eventSample.WorstFrameTimeMs.Value:0.00} ms");
+
+                if (baselineFrameTimeMs > 0)
+                {
+                    double worstFrameTimeRatio = eventSample.WorstFrameTimeMs.Value / baselineFrameTimeMs;
+                    evidence.Add($"worst frame time ratio {worstFrameTimeRatio:0.0}x");
+                }
             }
 
             evidence.Add($"peak CPU {peakCpu:0.0}%");
@@ -714,6 +1122,19 @@ namespace Gamepulse.Services
             evidence.Add($"peak disk read {peakDiskRead:0.0} MB/s");
             evidence.Add($"peak disk write {peakDiskWrite:0.0} MB/s");
 
+            if (primaryCause.Cause != "Not classified for diagnostic spike")
+            {
+                evidence.Add($"primary score: {primaryCause.Cause} ({primaryCause.Score})");
+            }
+
+            if (contributingCauses.Count > 0)
+            {
+                evidence.Add(
+                    "possible contributor scores: " +
+                    string.Join(", ", contributingCauses.Select(cause => $"{cause.Cause} ({cause.Score})"))
+                );
+            }
+
             if (!string.IsNullOrWhiteSpace(eventSample.TopCpuProcesses))
             {
                 evidence.Add($"top CPU process: {eventSample.TopCpuProcesses.Split('|')[0].Trim()}");
@@ -724,12 +1145,45 @@ namespace Gamepulse.Services
                 evidence.Add($"top RAM process: {eventSample.TopRamProcesses.Split('|')[0].Trim()}");
             }
 
-            evidence.Add($"highest scored cause: {bestCause.Cause}");
-
             return string.Join("; ", evidence);
         }
 
-        private static string BuildRecommendation(string cause)
+        private static string BuildRecommendation(
+            string primaryCause,
+            List<CauseScore> contributingCauses,
+            bool isMinorInfoIssue)
+        {
+            if (isMinorInfoIssue)
+            {
+                if (contributingCauses.Count == 0)
+                {
+                    return "This looks like a short diagnostic frame-time spike. No immediate setting change is recommended unless this repeats often or becomes noticeable.";
+                }
+
+                return
+                    "This was a diagnostic frame-time spike, not a confirmed major bottleneck. " +
+                    "Possible contributors were detected, but no immediate setting change is recommended unless similar spikes repeat often.";
+            }
+
+            List<string> recommendations = new()
+            {
+                GetRecommendationForCause(primaryCause)
+            };
+
+            foreach (CauseScore contributingCause in contributingCauses)
+            {
+                string recommendation = GetRecommendationForCause(contributingCause.Cause);
+
+                if (!recommendations.Contains(recommendation))
+                {
+                    recommendations.Add(recommendation);
+                }
+            }
+
+            return string.Join(" Also, ", recommendations);
+        }
+
+        private static string GetRecommendationForCause(string cause)
         {
             return cause switch
             {
@@ -743,10 +1197,13 @@ namespace Gamepulse.Services
                     "Close memory-heavy applications and lower texture quality or background app usage if RAM pressure remains high.",
 
                 "Disk or asset-loading spike" =>
-                    "Check for game asset loading, downloads, antivirus scans, or slow storage. Moving the game to a faster SSD may reduce similar stutters.",
+                    "Check for game asset loading, downloads, antivirus scans, or slow storage. Moving the game to a faster SSD may reduce similar hitches.",
 
                 "Background process impact" =>
-                    "Close or limit background applications that appear in top CPU/RAM lists during drops or stutters.",
+                    "Close or limit background applications that appear in top CPU/RAM lists during frame drops or frame-time spikes.",
+
+                "Mixed or unclear" =>
+                    "No single resource clearly explained the issue. Review the surrounding telemetry and compare repeated sessions for a stronger pattern.",
 
                 _ =>
                     "Review the surrounding telemetry and reduce the most active resource category during the affected seconds."
@@ -757,17 +1214,19 @@ namespace Gamepulse.Services
             List<PerformanceIssue> issues,
             SessionAnalysisResult result)
         {
-            if (issues.Count > 0)
+            if (issues.Count == 0)
             {
-                return issues
-                    .GroupBy(issue => issue.LikelyCause)
-                    .OrderByDescending(group => group.Count())
-                    .ThenByDescending(group => group.Count(issue => issue.Confidence == "High"))
-                    .Select(group => group.Key)
-                    .First();
+                return "No major bottleneck detected";
             }
 
-            return DetectOverallSystemPressure(result);
+            return issues
+                .Where(issue => issue.LikelyCause != "Mixed or unclear")
+                .Where(issue => issue.LikelyCause != "Not classified for diagnostic spike")
+                .GroupBy(issue => issue.LikelyCause)
+                .OrderByDescending(group => group.Count())
+                .ThenByDescending(group => group.Count(issue => issue.Confidence == "High"))
+                .Select(group => group.Key)
+                .FirstOrDefault() ?? "Mixed or unclear";
         }
 
         private static string DetectOverallSystemPressure(SessionAnalysisResult result)
@@ -821,41 +1280,89 @@ namespace Gamepulse.Services
             if (result.Issues.Any(issue => issue.LikelyCause == "Disk or asset-loading spike") ||
                 result.OverallBottleneck == "Disk or asset-loading spike")
             {
-                recommendations.Add("Check for storage spikes, downloads, antivirus scans, or asset loading. A faster SSD may reduce disk-related stutters.");
+                recommendations.Add("Check for storage spikes, downloads, antivirus scans, or asset loading. A faster SSD may reduce disk-related hitches.");
             }
 
-            if (result.Issues.Any(issue => issue.LikelyCause == "Background process impact"))
+            if (result.Issues.Any(issue => issue.LikelyCause == "Background process impact") ||
+                result.Issues.Any(issue => issue.ContributingFactors.Contains("Background process impact")))
             {
-                recommendations.Add("Close or limit background apps that appear in top CPU/RAM process lists during frame drops.");
+                recommendations.Add("Close or limit background apps that appear in top CPU/RAM process lists during frame drops or frame-time spikes.");
             }
 
             if (recommendations.Count == 0)
             {
-                recommendations.Add("No major bottleneck was detected. Keep monitoring longer sessions to capture rare frame drops or stutters.");
+                recommendations.Add("No major bottleneck was detected. No immediate setting change is recommended from this session.");
             }
 
             return recommendations.Distinct().ToList();
         }
 
-        private static string BuildOverallSummary(SessionAnalysisResult result)
+        private static void AddSessionCautionNotes(SessionAnalysisResult result)
         {
-            if (result.Issues.Count == 0)
+            if (result.PeakRamPercent >= VeryHighRamUsagePercent)
             {
-                return
-                    "No major FPS drops or stutters were detected by the current rules. " +
-                    "The session appears stable based on the captured frame and system telemetry.";
+                result.TechnicalNotes.Add(
+                    $"RAM usage was very high during the session, peaking at {result.PeakRamPercent:0.0}%. " +
+                    "This did not necessarily cause a frame issue in this run, but it may reduce headroom in longer sessions."
+                );
+            }
+            else if (result.PeakRamPercent >= HighRamUsagePercent)
+            {
+                result.TechnicalNotes.Add(
+                    $"RAM usage was high during the session, peaking at {result.PeakRamPercent:0.0}%. " +
+                    "Monitor this if stutters appear in longer sessions."
+                );
             }
 
+            if (result.PeakDiskActivePercent >= HighDiskActivePercent && result.Issues.Count == 0)
+            {
+                result.TechnicalNotes.Add(
+                    $"Disk active time peaked at {result.PeakDiskActivePercent:0.0}%. " +
+                    "Since no major frame issue was detected, this is logged as a caution rather than a confirmed bottleneck."
+                );
+            }
+        }
+
+        private static string BuildOverallSummary(SessionAnalysisResult result)
+        {
             int fpsDropCount = result.Issues.Count(issue =>
                 issue.IssueType.Contains("FPS", StringComparison.OrdinalIgnoreCase));
 
             int stutterCount = result.Issues.Count(issue =>
                 issue.IssueType.Contains("Stutter", StringComparison.OrdinalIgnoreCase));
 
+            int severeHitchCount = result.Issues.Count(issue =>
+                issue.IssueType.Contains("Severe Hitch", StringComparison.OrdinalIgnoreCase));
+
+            int severeFrameTimeSpikeCount = result.MinorIssues.Count(issue =>
+                issue.IssueType.Contains("Severe Frame-Time Spike", StringComparison.OrdinalIgnoreCase));
+
+            if (result.Issues.Count == 0)
+            {
+                return
+                    $"No major FPS drops, stutters, or gameplay-impacting severe hitches were detected. " +
+                    $"{result.MinorFrameTimeSpikeCount} minor/diagnostic frame-time spike sample(s) were logged, " +
+                    $"including {severeFrameTimeSpikeCount} severe single-frame spike sample(s). " +
+                    $"{result.CaptureGapCount} capture gap/no-render sample(s) were excluded from normal bottleneck analysis.";
+            }
+
+            string repeatedPattern = result.Issues
+                .Where(issue => issue.LikelyCause != "Mixed or unclear")
+                .Where(issue => issue.LikelyCause != "Not classified for diagnostic spike")
+                .GroupBy(issue => issue.LikelyCause)
+                .OrderByDescending(group => group.Count())
+                .Select(group => $"{group.Key} appeared in {group.Count()} major issue(s)")
+                .FirstOrDefault() ?? "No repeated cause pattern was strong enough to classify.";
+
             return
-                $"Detected {result.Issues.Count} notable performance issue(s), including " +
-                $"{fpsDropCount} FPS drop event(s) and {stutterCount} stutter event(s). " +
-                $"The most common likely cause was {result.OverallBottleneck}.";
+                $"Detected {result.Issues.Count} major performance issue(s), including " +
+                $"{fpsDropCount} FPS drop event(s), " +
+                $"{stutterCount} stutter event(s), and " +
+                $"{severeHitchCount} gameplay-impacting severe hitch event(s). " +
+                $"{result.MinorFrameTimeSpikeCount} minor/diagnostic frame-time spike sample(s) were logged separately, " +
+                $"including {severeFrameTimeSpikeCount} severe single-frame spike sample(s). " +
+                $"{result.CaptureGapCount} capture gap/no-render sample(s) were excluded from normal bottleneck analysis. " +
+                $"{repeatedPattern}.";
         }
 
         private static void AppendRecommendations(StringBuilder builder, List<string> recommendations)
@@ -866,6 +1373,25 @@ namespace Gamepulse.Services
             {
                 builder.AppendLine($"- {recommendation}");
             }
+        }
+
+        private static double GetBaselineFps(SessionAnalysisResult result)
+        {
+            return result.MedianFps > 0
+                ? result.MedianFps
+                : result.AverageFps;
+        }
+
+        private static double GetBaselineFrameTimeMs(SessionAnalysisResult result)
+        {
+            double baselineFps = GetBaselineFps(result);
+
+            if (baselineFps <= 0)
+            {
+                return 0;
+            }
+
+            return 1000.0 / baselineFps;
         }
 
         private static double Average(IEnumerable<double> values)
@@ -944,12 +1470,14 @@ namespace Gamepulse.Services
             public string Cause { get; }
             public int Score { get; }
             public string Confidence { get; }
+            public int Priority { get; }
 
-            public CauseScore(string cause, int score, string confidence)
+            public CauseScore(string cause, int score, string confidence, int priority)
             {
                 Cause = cause;
                 Score = score;
                 Confidence = confidence;
+                Priority = priority;
             }
         }
     }
